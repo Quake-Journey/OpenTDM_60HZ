@@ -108,6 +108,7 @@ cvar_t	*g_fast_weap_switch;
 cvar_t	*g_teleporter_nofreeze;
 cvar_t	*g_overtime;
 cvar_t	*g_tie_mode;
+cvar_t	*g_crushdiag;
 cvar_t	*g_gamemode;
 cvar_t	*g_respawn_time;
 cvar_t	*g_max_timeout;
@@ -210,6 +211,110 @@ DLL_EXPORT game_export_t *GetGameAPI (game_import_t *import)
 	globals.edict_size = sizeof(edict_t);
 
 	return &globals;
+}
+
+/*
+=================
+GetGameAPIEx
+
+opentdm-60hz: the Q2PRO extended game API (inc/shared/gameext.h, version
+3), used for one callback: the display of the weapon projectiles between
+their 100 ms grid steps (G_GridProjectile) to clients faster than 10 Hz.
+The engine gives a client's frame divisor through its private extension
+OPENTDM60_FRAMEDIV_V1; without it (another engine) projectiles go out as
+they are, as from a 10 Hz server. Every other entry point is NULL.
+=================
+*/
+#define OPENTDM60_FRAMEDIV_V1	"OPENTDM60_FRAMEDIV_V1"
+
+typedef struct
+{
+	int		(*ClientFrameDiv) (edict_t *ent);	// world frames per frame sent to it; 0: not in game
+} opentdm60_framediv_v1_t;
+
+typedef struct
+{
+	uint32	apiversion;
+	uint32	structsize;
+	void	*local_sound;
+	void	*get_configstring;
+	void	*clip;
+	void	*inVIS;
+	void	*(*GetExtension) (const char *name);
+	void	*TagRealloc;
+} q2pro_import_ex_t;
+
+typedef struct
+{
+	uint32	apiversion;
+	uint32	structsize;
+	void		*(*GetExtension) (const char *name);
+	qboolean	(*CanSave) (void);
+	void		(*PrepFrame) (void);
+	void		(*RestartFilesystem) (void);
+	qboolean	(*CustomizeEntityToClient) (edict_t *client, edict_t *ent, entity_state_t *temp);
+	qboolean	(*EntityVisibleToClient) (edict_t *client, edict_t *ent);
+} q2pro_export_ex_t;
+
+static const opentdm60_framediv_v1_t	*framediv_api;
+static q2pro_export_ex_t				globals_ex;
+
+/*
+A client of `d` world frames per frame (d < 6 at 60 Hz) gets the projectile
+at the fraction (j + d) / 6 of its last grid step, j world frames after
+it, and the fraction j / 6 as old_origin: drawn between them, it is where
+a 10 Hz client draws it at the same time (100 ms from the old to the new
+grid point). Its angles turn by the same fraction of the step (the
+shorter way round: a grenade spins 30 degrees per step on each axis).
+Collision, touches and damage use the grid state only.
+*/
+static qboolean G_CustomizeEntityToClient (edict_t *client, edict_t *ent, entity_state_t *temp)
+{
+	int		div, d, j, i;
+	float	f0, f1, da;
+
+	if (!ent->grid_move || ent->grid_frame < 0 || !framediv_api)
+		return false;
+
+	div = SECS_TO_FRAMES(0.1f);
+	d = framediv_api->ClientFrameDiv (client);
+	if (d < 1 || d >= div)
+		return false;	// the grid state itself, as from a 10 Hz server
+
+	// the engine asks after G_RunFrame: the step of this frame is j = 0
+	j = level.realframenum - 1 - ent->grid_frame;
+	if (j < 0)
+		j = 0;
+	f1 = (float)(j + d < div ? j + d : div) / div;
+	f0 = (float)(j < div ? j : div) / div;
+
+	*temp = ent->s;
+	for (i = 0; i < 3; i++)
+	{
+		temp->origin[i] = ent->grid_from[i] + (ent->s.origin[i] - ent->grid_from[i]) * f1;
+		temp->old_origin[i] = ent->grid_from[i] + (ent->s.origin[i] - ent->grid_from[i]) * f0;
+		da = ent->s.angles[i] - ent->grid_from_angles[i];
+		da -= 360.0f * floorf ((da + 180.0f) / 360.0f);
+		temp->angles[i] = ent->grid_from_angles[i] + da * f1;
+	}
+	return true;
+}
+
+DLL_EXPORT const q2pro_export_ex_t *GetGameAPIEx (const q2pro_import_ex_t *import)
+{
+	framediv_api = NULL;
+	if (import && import->apiversion >= 1 && import->GetExtension &&
+		import->structsize >= offsetof (q2pro_import_ex_t, GetExtension) + sizeof (import->GetExtension))
+		framediv_api = import->GetExtension (OPENTDM60_FRAMEDIV_V1);
+
+	memset (&globals_ex, 0, sizeof (globals_ex));
+	globals_ex.apiversion = 3;
+	globals_ex.structsize = sizeof (globals_ex);
+	if (framediv_api && framediv_api->ClientFrameDiv)
+		globals_ex.CustomizeEntityToClient = G_CustomizeEntityToClient;
+	else
+		framediv_api = NULL;
+	return &globals_ex;
 }
 
 #ifndef GAME_HARD_LINKED
@@ -479,7 +584,21 @@ void G_RunFrame (void)
 	//otherwise usercmds that arrive after we return will still use the old framenum, which seems wrong.
 	//level.realframenum++;
 
+	// opentdm-60hz: a timeout freezes the game clock and the world on the
+	// next grid frame, as on the next tick at 10 Hz (players and weapons
+	// stop at once, as at 10 Hz); the resume is on a grid frame too
+	// (TDM_CheckTimes), so the game's grid frames stay on FRAMESYNC
 	if (tdm_match_status != MM_TIMEOUT)
+		level.timeout_frozen = false;
+	else if (FRAMESYNC)
+	{
+		// the frozen tick's thinks and things in flight (rework 4)
+		if (!level.timeout_frozen)
+			G_FreezeFrame ();
+		level.timeout_frozen = true;
+	}
+
+	if (!GAME_FROZEN)
 	{
 		//level.framenum++;
 
@@ -497,6 +616,11 @@ void G_RunFrame (void)
 			else
 			{
 				ExitLevel ();
+				// opentdm-60hz: the engine counts this frame: keep the frame counters
+				// in step with it (a failed map change goes on on this map, and the
+				// grid frames must stay the engine's key frames)
+				level.realframenum++;
+				level.framenum++;
 				return;
 			}
 		}
@@ -518,12 +642,55 @@ void G_RunFrame (void)
 			// if the ground entity moved, make sure we are still on it
 			if ((ent->groundentity) && (ent->groundentity->linkcount != ent->groundentity_linkcount))
 			{
-				ent->groundentity = NULL;
+				// opentdm-60hz (rework 7): a thing lying on a moving part (an item,
+				// a body) too: its toss physics lands it again only on its 100 ms
+				// step (the 10 Hz ballistics), so between grid frames it lost the
+				// ride and the part moved away under it (at 10 Hz every frame is
+				// that step: the original code). Only on a moving part: a thing
+				// lying on a player falls on him again when he moves, as before.
+				if (ent->client || (SECS_TO_FRAMES(0.1f) > 1 &&
+					(ent->movetype == MOVETYPE_TOSS || ent->movetype == MOVETYPE_BOUNCE) &&
+					(ent->groundentity->movetype == MOVETYPE_PUSH || ent->groundentity->movetype == MOVETYPE_STOP)))
+				{
+					vec3_t	end;
+					trace_t	trace;
+
+					// A pusher can carry a client without a new usercmd. Recheck
+					// actual support, also after a team push was rolled back.
+					// (q2trek/opentdm e5e5e4a)
+					VectorCopy (ent->s.origin, end);
+					end[2] -= 0.25f;
+					trace = gi.trace (ent->s.origin, ent->mins, ent->maxs, end, ent,
+						!ent->client ? (ent->clipmask ? ent->clipmask : MASK_SOLID)
+						: ent->health > 0 ? MASK_PLAYERSOLID : MASK_DEADSOLID);
+					if (!trace.startsolid && !trace.allsolid
+						&& trace.ent == ent->groundentity
+						&& trace.plane.normal[2] >= 0.7f)
+					{
+						ent->groundentity_linkcount = ent->groundentity->linkcount;
+					}
+					else
+					{
+						ent->groundentity = NULL;
+					}
+				}
+				else
+				{
+					ent->groundentity = NULL;
+				}
 			}
 
 			if (i > 0 && i <= game.maxclients)
 			{
 				ClientBeginServerFrame (ent);
+				continue;
+			}
+
+			// opentdm-60hz: weapon projectiles run on the 100 ms grid frames only
+			if (ent->grid_move)
+			{
+				if (FRAMESYNC)
+					G_RunGridEntity (ent);
 				continue;
 			}
 
@@ -545,7 +712,7 @@ void G_RunFrame (void)
 
 	level.realframenum++;
 
-	if (tdm_match_status != MM_TIMEOUT)
+	if (!GAME_FROZEN)
 	{
 		// save old_origins for next frame
 		ent = &g_edicts[0];

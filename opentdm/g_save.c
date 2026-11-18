@@ -230,6 +230,7 @@ void InitGame (void)
 	g_teleporter_nofreeze = gi.cvar ("g_teleporter_nofreeze", "0", 0);
 
 	g_tie_mode = gi.cvar ("g_tie_mode", "1", 0);
+	g_crushdiag = gi.cvar ("g_crushdiag", "0", 0);
 	// wision: 60 as default overtime for all leagues
 	g_overtime = gi.cvar ("g_overtime", "60", 0);
 	// wision: default from other mods (battle)..
@@ -296,7 +297,7 @@ void InitGame (void)
 
 	//ensure it has NOSET if it didn't exist
 	(void)gi.cvar ("g_features", "0", CVAR_NOSET);
-	gi.cvar_forceset ("g_features", va("%d", GMF_CLIENTNUM | GMF_WANT_ALL_DISCONNECTS | GMF_PROPERINUSE | GMF_MVDSPEC));
+	gi.cvar_forceset ("g_features", va("%d", GMF_CLIENTNUM | GMF_WANT_ALL_DISCONNECTS | GMF_PROPERINUSE | GMF_MVDSPEC | GMF_VARIABLE_FPS));
 
 	//init server features
 	sv_features = gi.cvar ("sv_features", NULL, 0);
@@ -306,6 +307,7 @@ void InitGame (void)
 		game.server_features = 0;
 
 	TDM_Init ();
+	TDM_MvdInit ();
 }
 
 /*

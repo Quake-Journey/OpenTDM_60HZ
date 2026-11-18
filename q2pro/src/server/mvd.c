@@ -74,6 +74,13 @@ typedef struct {
 
     // local recorder
     qhandle_t       recording;
+    // automatic match recording, ported from OpenTDM-X 9c0749f9b for
+    // human matches (opentdm-60hz, sv_mvd_autorecord_matches)
+    bool            match_recording; // owned by the mod's match lifecycle
+    bool            match_stop_pending; // close only after pending messages/frame
+    bool            match_fight_print; // actual Fight! printed before start request
+    char            match_filename[MAX_OSPATH]; // actual exclusive-open path
+    char            match_final_name[MAX_OSPATH]; // score label supplied after stats
     int             numlevels; // stop after that many levels
     int             numframes; // stop after that many frames
 
@@ -109,6 +116,8 @@ static cvar_t   *sv_mvd_disconnect_time;
 static cvar_t   *sv_mvd_suspend_time;
 static cvar_t   *sv_mvd_allow_stufftext;
 static cvar_t   *sv_mvd_spawn_dummy;
+static cvar_t   *sv_mvd_match_recording; // read-only capability and status
+static char     match_record_request[MAX_OSPATH];
 
 static bool     mvd_enable(void);
 static void     mvd_disable(void);
@@ -121,9 +130,21 @@ static void     flush_stream(gtv_client_t *client, int flush);
 #endif
 
 static void     rec_stop(void);
+static void     rec_match_finalize_name(void);
 static bool     rec_allowed(void);
 static void     rec_start(qhandle_t demofile);
 static void     rec_write(void);
+static bool     rec_start_named(const char *name, unsigned mode, bool match_recording);
+static void     mvd_end_frame(bool force);
+
+static bool automatic_only(void)
+{
+    if (Cvar_VariableInteger("sv_mvd_autorecord_matches") <= 0)
+        return false;
+    Com_Printf("MVD recording is controlled by automatic match recording (sv_mvd_autorecord_matches); "
+               "external recording commands are ignored.\n");
+    return true;
+}
 
 
 /*
@@ -170,6 +191,9 @@ static void dummy_record_f(void)
     char buffer[MAX_OSPATH];
     qhandle_t f;
 
+    if (automatic_only())
+        return;
+
     if (!sv_mvd_autorecord->integer) {
         return;
     }
@@ -201,6 +225,8 @@ static void dummy_record_f(void)
 
 static void dummy_stop_f(void)
 {
+    if (automatic_only())
+        return;
     if (!sv_mvd_autorecord->integer) {
         return;
     }
@@ -891,7 +917,7 @@ static void check_clients_activity(void)
 // suspends or resumes MVD streams depending on players activity
 static void check_players_activity(void)
 {
-    if (!sv_mvd_suspend_time->integer || players_active()) {
+    if (!sv_mvd_suspend_time->integer || mvd.match_recording || players_active()) {
         mvd.players_active = svs.realtime;
         if (!mvd.active) {
             resume_streams();
@@ -1008,14 +1034,30 @@ void SV_MvdBeginFrame(void)
 SV_MvdEndFrame
 ==================
 */
-void SV_MvdEndFrame(void)
+static void mvd_end_frame(bool force)
 {
     gtv_client_t *client;
     size_t total;
     byte header[3];
 
-    if (!SV_FRAMESYNC)
+    if (!force && !SV_FRAMESYNC)
         return;
+
+    if (match_record_request[0]) {
+        char name[MAX_OSPATH];
+        bool fight_print = mvd.match_fight_print;
+        Q_strlcpy(name, match_record_request, sizeof(name));
+        match_record_request[0] = 0;
+        if (Cvar_VariableInteger("sv_mvd_autorecord_matches") > 0) {
+            if (mvd.recording) rec_stop(); // automatic mode takes ownership
+            rec_start_named(name, FS_MODE_WRITE, true);
+            if (mvd.enabled && !mvd.active)
+                resume_streams();
+            if (mvd.match_recording && fight_print)
+                SV_MvdBroadcastPrint(PRINT_HIGH, "Fight!\n");
+        }
+    }
+    mvd.match_fight_print = false;
 
     // do nothing if not enabled
     if (!mvd.enabled) {
@@ -1086,6 +1128,18 @@ void SV_MvdEndFrame(void)
     // clear datagrams
     SZ_Clear(&mvd.datagram);
     SZ_Clear(&mvd.message);
+
+    // Forfeit may be raised by a client packet between game frames. Closing
+    // from the command buffer would discard its still-buffered match stats.
+    if (mvd.match_recording && mvd.match_stop_pending) {
+        Com_Printf("Stopped automatic match MVD.\n");
+        rec_stop();
+    }
+}
+
+void SV_MvdEndFrame(void)
+{
+    mvd_end_frame(false);
 }
 
 
@@ -1249,6 +1303,11 @@ SV_MvdBroadcastPrint
 */
 void SV_MvdBroadcastPrint(int level, const char *string)
 {
+    // Keep the actual start notification from this game frame, rather than
+    // inventing it later or including the preceding countdown in the demo.
+    if (!mvd.active && level == PRINT_HIGH && !strcmp(string, "Fight!\n") &&
+        Cvar_VariableInteger("sv_mvd_autorecord_matches") > 0)
+        mvd.match_fight_print = true;
     if (mvd.active) {
         SZ_WriteByte(&mvd.message, mvd_print);
         SZ_WriteByte(&mvd.message, level);
@@ -1991,10 +2050,30 @@ SV_MvdMapChanged
 Server has just changed the map, spawn the MVD dummy and go!
 ==================
 */
+void SV_MvdMapChanging(void)
+{
+    match_record_request[0] = 0;
+    mvd.match_fight_print = false;
+    if (mvd.match_recording) {
+        // A forfeit may have printed statistics outside a regular game frame.
+        mvd_end_frame(true);
+        rec_stop();
+    }
+    // The new map emits a full gamestate. Capturing all loading configstring
+    // updates first can overflow reliable data with a normal 15-bot roster.
+    mvd.active = false;
+    SZ_Clear(&mvd.datagram);
+    SZ_Clear(&mvd.message);
+}
+
 void SV_MvdMapChanged(void)
 {
     gtv_client_t *client;
     int ret;
+
+    // An automatic match file must never continue into the next warmup/map.
+    if (mvd.match_recording)
+        rec_stop();
 
     if (!mvd.entities) {
         return; // do nothing if disabled
@@ -2160,6 +2239,7 @@ Server is shutting down, clean everything up.
 */
 void SV_MvdShutdown(error_type_t type)
 {
+    match_record_request[0] = 0;
     // stop recording
     rec_stop();
 
@@ -2221,6 +2301,7 @@ fail:
 static void rec_stop(void)
 {
     uint16_t msglen;
+    bool was_match_recording = mvd.match_recording;
 
     if (!mvd.recording) {
         return;
@@ -2232,6 +2313,14 @@ static void rec_stop(void)
 
     FS_CloseFile(mvd.recording);
     mvd.recording = 0;
+    if (was_match_recording && mvd.match_final_name[0])
+        rec_match_finalize_name();
+    mvd.match_filename[0] = mvd.match_final_name[0] = 0;
+    mvd.match_recording = false;
+    mvd.match_stop_pending = false;
+    Cvar_SetByVar(sv_mvd_match_recording, "0", FROM_CODE);
+    if (was_match_recording && LIST_EMPTY(&gtv_active_list))
+        mvd_disable(); // no capture of the following warmup/loading messages
 }
 
 static bool rec_allowed(void)
@@ -2285,17 +2374,120 @@ Begins server MVD recording.
 Every entity, every playerinfo and every message will be recorded.
 ==============
 */
-void SV_MvdRecord_f(void)
+static qhandle_t rec_match_open(char *buffer, size_t size, const char *name, unsigned mode)
+{
+    char normalized[MAX_OSPATH], suffix[16];
+    qhandle_t file = 0;
+    int64_t ret = Q_ERR_INVALID_PATH;
+
+    // Same path cleanup as FS_EasyOpenFile, with exclusive creation and a
+    // suffix on collisions (e.g. a server restart after its clock moved back).
+    if (FS_NormalizePathBuffer(normalized, name, sizeof(normalized)) >= sizeof(normalized) ||
+        !normalized[0])
+        goto fail;
+    FS_CleanupPath(normalized);
+    if (!COM_CompareExtension(normalized, ".mvd2"))
+        normalized[strlen(normalized) - 5] = 0;
+    for (unsigned i = 0; i < 1000; i++) {
+        suffix[0] = 0;
+        if (i) Q_snprintf(suffix, sizeof(suffix), "_%03u", i);
+        if (Q_snprintf(buffer, size, "demos/%s%s.mvd2%s", normalized, suffix,
+                       (mode & FS_FLAG_GZIP) ? ".gz" : "") >= size)
+            goto fail;
+        ret = FS_OpenFile(buffer, &file, mode | FS_FLAG_EXCL);
+        if (file) return file;
+        if (ret != Q_ERR(EEXIST)) break;
+    }
+fail:
+    Com_EPrintf("Couldn't open automatic MVD %s: %s\n", name, Q_ErrorString(ret));
+    return 0;
+}
+
+/* Final score is known only after the mod's complete match table. Close
+ * and write EOF first, then rename this recorder's own file in the SAME
+ * writable mod directory. Never overwrite an earlier demo on collisions. */
+static void rec_match_finalize_name(void)
+{
+    char name[MAX_OSPATH], relative[MAX_OSPATH], source[MAX_OSPATH], target[MAX_OSPATH];
+    size_t length = FS_NormalizePathBuffer(name, mvd.match_final_name, sizeof(name));
+    if (length >= sizeof(name) || !length || !FS_ValidatePath(name) ||
+        strchr(name, '/') || strchr(name, '\\')) {
+        Com_EPrintf("Invalid automatic MVD final name. Original recording retained.\n");
+        return;
+    }
+    if (!COM_CompareExtension(name, ".mvd2"))name[strlen(name)-5] = 0;
+    if (Q_concat(source, sizeof(source), fs_gamedir, "/", mvd.match_filename) >= sizeof(source))return;
+    for (unsigned i = 0; i < 1000; i++) {
+        if (i) Q_snprintf(relative, sizeof(relative), "demos/%s_%03u.mvd2", name, i);
+        else Q_snprintf(relative, sizeof(relative), "demos/%s.mvd2", name);
+        if (strlen(relative) + 1 >= sizeof(relative) ||
+            Q_concat(target, sizeof(target), fs_gamedir, "/", relative) >= sizeof(target))break;
+        int ret;
+#ifdef _WIN32
+        /* Windows CRT rename fails if the destination already exists. */
+        ret = rename(source, target);
+#else
+        /* POSIX rename replaces its target. Link atomically refuses an
+         * existing name, then unlink only our old directory entry. */
+        ret = link(source, target);
+        if (!ret && unlink(source)) {
+            Com_WPrintf("Automatic MVD saved as %s; couldn't remove old name %s: %s\n",
+                relative, mvd.match_filename, strerror(errno));
+            return;
+        }
+#endif
+        if (!ret) {
+            Com_Printf("Finalized automatic MVD: %s\n", relative);
+            return;
+        }
+        int error = errno;
+        Q_STATBUF status;
+        /* Windows reports EACCES for an existing destination. Detect the
+         * occupied path without replacing it, then use the next suffix. */
+        if (error == EEXIST || !os_stat(target, &status))continue;
+        Com_EPrintf("Couldn't finalize automatic MVD name: %s. Original %s retained.\n",
+            strerror(error), mvd.match_filename);
+        return;
+    }
+    Com_EPrintf("Couldn't find a free automatic MVD final name. Original %s retained.\n",mvd.match_filename);
+}
+
+static bool rec_start_named(const char *name, unsigned mode, bool match_recording)
 {
     char buffer[MAX_OSPATH];
     qhandle_t f;
-    unsigned mode = FS_MODE_WRITE;
-    int c;
 
     if (sv.state != ss_game) {
         Com_Printf("No server running.\n");
-        return;
+        return false;
     }
+
+    if (!rec_allowed())
+        return false;
+    f = match_recording ? rec_match_open(buffer, sizeof(buffer), name, mode) :
+        FS_EasyOpenFile(buffer, sizeof(buffer), mode, "demos/", name, ".mvd2");
+    if (!f) return false;
+    if (!mvd_enable()) {
+        FS_CloseFile(f);
+        return false;
+    }
+    Com_Printf("Recording local MVD to %s\n", buffer);
+    mvd.match_recording = match_recording;
+    mvd.match_stop_pending = false;
+    mvd.match_final_name[0] = 0;
+    Q_strlcpy(mvd.match_filename, match_recording ? buffer : "", sizeof(mvd.match_filename));
+    Cvar_SetByVar(sv_mvd_match_recording, match_recording ? "1" : "0", FROM_CODE);
+    rec_start(f);
+    return mvd.recording != 0;
+}
+
+void SV_MvdRecord_f(void)
+{
+    unsigned mode = FS_MODE_WRITE;
+    int c;
+
+    if (automatic_only())
+        return;
 
     while ((c = Cmd_ParseOptions(o_record)) != -1) {
         switch (c) {
@@ -2318,27 +2510,39 @@ void SV_MvdRecord_f(void)
         return;
     }
 
-    if (!rec_allowed()) {
-        return;
+    rec_start_named(cmd_optarg, mode, false);
+}
+
+bool SV_MvdGameCommand(const char *text)
+{
+    static const char begin[] = "mvdmatchrecord \"";
+    static const char final[] = "mvdmatchname \"";
+    size_t prefix = sizeof(begin) - 1, length;
+    if (!text) return false;
+    if (!strcmp(text, "mvdmatchstop\n")) {
+        match_record_request[0] = 0;
+        if (mvd.match_recording) mvd.match_stop_pending = true;
+        return true;
     }
-
-    //
-    // open the demo file
-    //
-    f = FS_EasyOpenFile(buffer, sizeof(buffer), mode,
-                        "demos/", cmd_optarg, ".mvd2");
-    if (!f) {
-        return;
+    bool final_name = !strncmp(text, final, sizeof(final)-1);
+    if (final_name)prefix = sizeof(final)-1;
+    else if (strncmp(text, begin, prefix)) return false;
+    length = strlen(text);
+    if (length < prefix + 2 || strcmp(text + length - 2, "\"\n") ||
+        length - prefix - 2 >= sizeof(match_record_request)) {
+        Com_EPrintf("Invalid private MVD match recording request.\n");
+        return true;
     }
-
-    if (!mvd_enable()) {
-        FS_CloseFile(f);
-        return;
+    if (final_name) {
+        if (mvd.match_recording) {
+            memcpy(mvd.match_final_name, text + prefix, length - prefix - 2);
+            mvd.match_final_name[length-prefix-2] = 0;
+        }
+    } else {
+        memcpy(match_record_request, text + prefix, length - prefix - 2);
+        match_record_request[length - prefix - 2] = 0;
     }
-
-    Com_Printf("Recording local MVD to %s\n", buffer);
-
-    rec_start(f);
+    return true;
 }
 
 
@@ -2351,6 +2555,8 @@ Ends server MVD recording
 */
 void SV_MvdStop_f(void)
 {
+    if (automatic_only())
+        return;
     if (!mvd.recording) {
         Com_Printf("Not recording a local MVD.\n");
         return;
@@ -2370,6 +2576,8 @@ CVARS AND COMMANDS
 
 static void SV_MvdStuff_f(void)
 {
+    if (automatic_only())
+        return;
     if (mvd.dummy) {
         Cbuf_AddText(&dummy_buffer, COM_StripQuotes(Cmd_RawArgs()));
         Cbuf_AddText(&dummy_buffer, "\n");
@@ -2456,6 +2664,7 @@ void SV_MvdRegister(void)
     sv_mvd_suspend_time->changed(sv_mvd_suspend_time);
     sv_mvd_allow_stufftext = Cvar_Get("sv_mvd_allow_stufftext", "0", CVAR_LATCH);
     sv_mvd_spawn_dummy = Cvar_Get("sv_mvd_spawn_dummy", "1", 0);
+    sv_mvd_match_recording = Cvar_Get("sv_mvd_match_recording", "0", CVAR_ROM);
 
     Cmd_Register(c_svmvd);
 }

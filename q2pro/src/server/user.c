@@ -856,7 +856,7 @@ static void SV_PacketdupHack_f(void)
 
     if (Cmd_Argc() > 1) {
         // loopback loses nothing, and the copies of a batch overflow its queue
-        if (sv_client->netchan.remote_address.type == NA_LOOPBACK) {
+        if (NET_IsLocalAddress(&sv_client->netchan.remote_address)) {
             SV_ClientPrintf(sv_client, PRINT_HIGH, "Packetdup is not used on loopback.\n");
             return;
         }
@@ -1181,6 +1181,9 @@ static void SV_SetLastFrame(int lastframe)
 SV_OldClientExecuteMove
 ==================
 */
+// usercmds that were new in the move packet just executed (motiondiag)
+static int move_fresh;
+
 static void SV_OldClientExecuteMove(void)
 {
     usercmd_t   oldest, oldcmd, newcmd;
@@ -1240,6 +1243,7 @@ static void SV_OldClientExecuteMove(void)
 
     // run new cmd
     SV_ClientThink(&newcmd);
+    move_fresh = 1;
 
     sv_client->lastcmd = newcmd;
 }
@@ -1343,6 +1347,7 @@ static void SV_NewClientExecuteMove(int c)
     for (j = 0; j < numCmds[numDups]; j++) {
         SV_ClientThink(&cmds[numDups][j]);
     }
+    move_fresh = numCmds[numDups];
 
     sv_client->lastcmd = *lastcmd;
 }
@@ -1641,7 +1646,10 @@ void SV_ExecuteClientMessage(client_t *client)
             switch (c & SVCMD_MASK) {
             case clc_move_nodelta:
             case clc_move_batched:
+                move_fresh = 0;
+                SV_MotionDiagMoveBegin();
                 SV_NewClientExecuteMove(c);
+                SV_MotionDiagMoveEnd(move_fresh, sv_client->lastcmd.forwardmove || sv_client->lastcmd.sidemove);
                 goto nextcmd;
             }
         }
@@ -1660,7 +1668,10 @@ badbyte:
             break;
 
         case clc_move:
+            move_fresh = 0;
+            SV_MotionDiagMoveBegin();
             SV_OldClientExecuteMove();
+            SV_MotionDiagMoveEnd(move_fresh, sv_client->lastcmd.forwardmove || sv_client->lastcmd.sidemove);
             break;
 
         case clc_stringcmd:

@@ -591,6 +591,20 @@ void SV_CleanClient(client_t *client);
 
 void SV_InitOperatorCommands(void);
 
+// tickdiag.c: world step pacing diagnostics (sv_tickdiag, off by default)
+void SV_TickDiagInit(void);
+void SV_TickDiagWake(bool stepping);
+void SV_TickDiagStep(uint64_t credit);
+void SV_TickDiagStepDone(bool sent);
+void SV_TickDiagResidualReset(void);
+
+// motiondiag.c: movement delivery diagnostics (sv_motiondiag, off by default)
+void SV_MotionDiagInit(void);
+void SV_MotionDiagMoveBegin(void);
+void SV_MotionDiagMoveEnd(int fresh, bool buttons_move);
+void SV_MotionDiagStep(void);
+void SV_MotionDiagSent(client_t *client);
+
 void SV_UserinfoChanged(client_t *cl);
 
 bool SV_RateLimited(ratelimit_t *r);
@@ -659,7 +673,9 @@ void SV_MvdBeginFrame(void);
 void SV_MvdEndFrame(void);
 void SV_MvdRunClients(void);
 void SV_MvdStatus_f(void);
+void SV_MvdMapChanging(void);
 void SV_MvdMapChanged(void);
+bool SV_MvdGameCommand(const char *text);
 void SV_MvdClientDropped(client_t *client);
 
 void SV_MvdUnicast(const edict_t *ent, int clientNum, bool reliable);
@@ -681,7 +697,9 @@ void SV_MvdStop_f(void);
 #define SV_MvdEndFrame()            (void)0
 #define SV_MvdRunClients()          (void)0
 #define SV_MvdStatus_f()            (void)0
+#define SV_MvdMapChanging()         (void)0
 #define SV_MvdMapChanged()          (void)0
+#define SV_MvdGameCommand(text)     false
 #define SV_MvdClientDropped(client) (void)0
 
 #define SV_MvdUnicast(ent, clientNum, reliable)     (void)0

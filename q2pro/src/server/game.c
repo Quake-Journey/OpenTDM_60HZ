@@ -735,6 +735,10 @@ static cvar_t *PF_cvar(const char *name, const char *value, int flags)
 
 static void PF_AddCommandString(const char *string)
 {
+    // match recording is a private request of the game, not an
+    // operator/rcon command: it never reaches the command buffer
+    if (SV_MvdGameCommand(string))
+        return;
 #if USE_CLIENT
     if (!strcmp(string, "menu_loadgame\n"))
         string = "pushmenu loadgame\n";
@@ -875,10 +879,47 @@ static const debug_draw_api_v1_t debug_draw_api_v1 = {
 };
 #endif
 
+/*
+opentdm-60hz: private engine <-> OpenTDM extension. ClientFrameDiv gives
+the world frames per frame sent to a client in game (1 at the full world
+rate, 6 for a 10 Hz client of a 60 Hz world; 0: not a client in game), so
+the game can present its 100 ms projectile steps to faster clients
+(CustomizeEntityToClient). Not an extended API version of its own.
+*/
+#define OPENTDM60_FRAMEDIV_V1 "OPENTDM60_FRAMEDIV_V1"
+
+typedef struct {
+    int (*ClientFrameDiv)(edict_t *ent);
+} opentdm60_framediv_v1_t;
+
+static int PF_ClientFrameDiv(edict_t *ent)
+{
+    if (!ent || !ge)
+        return 0;
+    int n = NUM_FOR_EDICT(ent);
+    if (n < 1 || n > sv_maxclients->integer)
+        return 0;
+    const client_t *cl = &svs.client_pool[n - 1];
+    if (cl->state != cs_spawned || cl->edict != ent)
+        return 0;
+#if USE_FPS
+    return cl->framediv;
+#else
+    return 1;
+#endif
+}
+
+static const opentdm60_framediv_v1_t opentdm60_framediv_v1 = {
+    .ClientFrameDiv = PF_ClientFrameDiv,
+};
+
 static void *PF_GetExtension(const char *name)
 {
     if (!name)
         return NULL;
+
+    if (!strcmp(name, OPENTDM60_FRAMEDIV_V1))
+        return (void *)&opentdm60_framediv_v1;
 
     if (!strcmp(name, FILESYSTEM_API_V1))
         return (void *)&filesystem_api_v1;

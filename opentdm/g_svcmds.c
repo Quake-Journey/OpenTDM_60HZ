@@ -354,6 +354,25 @@ void Svcmd_Itemlist_f (void)
 
 /*
 =================
+SVCmd_CrushDiag_f
+
+sv crushdiag: busy crush pairs now and hits through the full table's
+per-victim limit on this map (G_CrushAllowed).
+=================
+*/
+static void SVCmd_CrushDiag_f (void)
+{
+	int	i, busy = 0;
+
+	for (i = 0; i < MAX_CRUSH; i++)
+		if (level.crush[i].framenum > level.framenum)
+			busy++;
+	gi.cprintf (NULL, PRINT_HIGH, "crush pairs busy: %d of %d; overflow hits on this map: %d; g_crushdiag %d\n",
+		busy, MAX_CRUSH, level.crush_overflows, g_crushdiag ? (int)g_crushdiag->value : 0);
+}
+
+/*
+=================
 ServerCommand
 
 ServerCommand will be called when an "sv" command is issued.
@@ -377,6 +396,8 @@ void	ServerCommand (void)
 		SVCmd_ListIP_f (NULL);
 	else if (Q_stricmp (cmd, "writeip") == 0)
 		SVCmd_WriteIP_f ();
+	else if (Q_stricmp (cmd, "crushdiag") == 0)
+		SVCmd_CrushDiag_f ();
 	else if (TDM_ServerCommand (cmd))
 	{
 		//nothing, processed bg g_tdmstuff

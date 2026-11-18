@@ -182,7 +182,9 @@ void G_UseTargets (edict_t *ent, edict_t *activator)
 	// create a temp object to fire at a later time
 		t = G_Spawn();
 		t->classname = "DelayedUse";
-		t->nextthink = level.framenum + SECS_TO_FRAMES(ent->delay);
+		// opentdm-60hz: from the coming grid frame (a touch or a command is
+		// between two frames), in whole 100 ms ticks, as at 10 Hz
+		t->nextthink = G_WindowFrame (level.framenum) + G_GridFrames (ent->delay);
 		t->think = Think_Delay;
 		t->activator = activator;
 		if (!activator)
@@ -481,10 +483,75 @@ void G_FreeEdict (edict_t *ed)
 		return;
 	}
 
+	// a new entity in this slot starts without the crush cooldown
+	for (int i = 0; i < MAX_CRUSH; i++)
+	{
+		if (level.crush[i].self == ed || level.crush[i].other == ed)
+			level.crush[i].framenum = 0;
+	}
+
 	memset (ed, 0, sizeof(*ed));
 	ed->classname = "freed";
 	ed->freed_framenum = level.framenum;
 	ed->inuse = false;
+}
+
+/*
+=================
+G_CrushAllowed
+
+World-driven continuous crush (blocked door/plat/rotating, func_object
+resting on a moving victim) runs every world frame. Each source/victim pair
+deals damage at most once per 0.1 s, as at 10 Hz: the first hit is
+immediate, repeated callbacks of one frame do not hit again, other pairs
+are independent. The physical reaction to the block is not gated.
+With more than MAX_CRUSH pairs within 0.1 s, the pairs left out of the
+table hit each victim at most once per 0.1 s (crush_framenum); no pair
+hits a victim within 0.1 s of such a hit. (q2trek/opentdm 69fc811)
+Every such hit counts in level.crush_overflows (`sv crushdiag`); with
+g_crushdiag 1 the server console reports it, at most once per second.
+=================
+*/
+qboolean G_CrushAllowed (edict_t *self, edict_t *other)
+{
+	int	i, free = -1;
+
+	for (i = 0; i < MAX_CRUSH; i++)
+	{
+		if (level.crush[i].self == self && level.crush[i].other == other)
+			break;
+		if (free < 0 && level.crush[i].framenum <= level.framenum)
+			free = i;
+	}
+	if (level.framenum < other->crush_framenum)
+		return false;	// a table overflow hit this victim within 0.1 s
+	if (i < MAX_CRUSH)
+	{
+		if (level.framenum < level.crush[i].framenum)
+			return false;
+	}
+	else if (free >= 0)
+	{
+		i = free;
+	}
+	else
+	{
+		// table full: at most one hit per 0.1 s on this victim
+		other->crush_framenum = level.framenum + SECS_TO_FRAMES(0.1f);
+		level.crush_overflows++;
+		if (g_crushdiag && g_crushdiag->value && level.realframenum >= level.crush_report_framenum)
+		{
+			gi.dprintf ("crushdiag: all %d crush pairs busy, %s hit %s through the per-victim limit "
+				"(%d such hits on this map)\n", MAX_CRUSH, self->classname ? self->classname : "?",
+				other->classname ? other->classname : "?", level.crush_overflows);
+			level.crush_report_framenum = level.realframenum + SECS_TO_FRAMES(1);
+		}
+		return true;
+	}
+	level.crush[i].self = self;
+	level.crush[i].other = other;
+	level.crush[i].framenum = level.framenum + SECS_TO_FRAMES(0.1f);
+	return true;
 }
 
 
@@ -681,4 +748,37 @@ qboolean infront (edict_t *self, edict_t *other)
 	if (dot > 0.3f)
 		return true;
 	return false;
+}
+
+/*
+=================
+G_WindowFrame
+
+opentdm-60hz: the frame number of the 100 ms grid frame at or after
+`framenum` (the frame itself at 10 Hz). Between two frames, the frame
+counters hold the number of the coming frame; at 10 Hz every coming
+frame is a tick, so ClientThink sees the time of the coming tick.
+=================
+*/
+int G_WindowFrame (int framenum)
+{
+	int	div = SECS_TO_FRAMES(0.1f);
+
+	if (div <= 1 || framenum <= 0)
+		return framenum;
+	return ((framenum + div - 1) / div) * div;
+}
+
+/*
+=================
+G_GridFrames
+
+opentdm-60hz: a time in seconds of a map key ("wait", "delay") as frames
+of whole 100 ms ticks, as SECS_TO_FRAMES counts it at 10 Hz (a part of a
+tick is dropped there). Equal to SECS_TO_FRAMES at 10 Hz.
+=================
+*/
+int G_GridFrames (float seconds)
+{
+	return SECS_TO_FRAMES(0.1f) * (int)(seconds * 10);
 }

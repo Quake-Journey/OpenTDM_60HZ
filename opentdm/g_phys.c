@@ -389,6 +389,7 @@ typedef struct
 	edict_t	*ent;
 	vec3_t	origin;
 	vec3_t	angles;
+	vec3_t	carry;
 	float	deltayaw;
 } pushed_t;
 pushed_t	pushed[MAX_EDICTS], *pushed_p;
@@ -409,19 +410,21 @@ qboolean SV_Push (edict_t *pusher, vec3_t move, vec3_t amove)
 	edict_t		*check, *block;
 	vec3_t		mins, maxs;
 	pushed_t	*p;
-	vec3_t		org, org2, move2, forward, right, up;
+	vec3_t		org, org2, move2, forward, right, up, carry;
 
 	// clamp the move to 1/8 units, so the position will
-	// be accurate for client side prediction
+	// be accurate for client side prediction; the rounding remainder
+	// is carried to the next move of this path (part of the push
+	// transaction, restored on a block) (q2trek/opentdm 1f0f101)
+	VectorCopy (pusher->push_carry, carry);
 	for (i=0 ; i<3 ; i++)
 	{
 		float	temp;
-		temp = move[i]*8.0f;
-		if (temp > 0.0f)
-			temp += 0.5f;
-		else
-			temp -= 0.5f;
-		move[i] = 0.125f * (int)temp;
+		int		r;
+		temp = move[i]*8.0f + pusher->push_carry[i];
+		r = (int)(temp > 0.0f ? temp + 0.5f : temp - 0.5f);
+		pusher->push_carry[i] = temp - r;
+		move[i] = 0.125f * r;
 	}
 
 	// find the bounding box
@@ -439,6 +442,7 @@ qboolean SV_Push (edict_t *pusher, vec3_t move, vec3_t amove)
 	pushed_p->ent = pusher;
 	VectorCopy (pusher->s.origin, pushed_p->origin);
 	VectorCopy (pusher->s.angles, pushed_p->angles);
+	VectorCopy (carry, pushed_p->carry);
 	if (pusher->client)
 		pushed_p->deltayaw = pusher->client->ps.pmove.delta_angles[YAW];
 	pushed_p++;
@@ -486,6 +490,7 @@ qboolean SV_Push (edict_t *pusher, vec3_t move, vec3_t amove)
 			pushed_p->ent = check;
 			VectorCopy (check->s.origin, pushed_p->origin);
 			VectorCopy (check->s.angles, pushed_p->angles);
+			VectorCopy (check->push_carry, pushed_p->carry);
 
 			// try moving the contacted entity 
 			VectorAdd (check->s.origin, move, check->s.origin);
@@ -539,6 +544,7 @@ qboolean SV_Push (edict_t *pusher, vec3_t move, vec3_t amove)
 		{
 			VectorCopy (p->origin, p->ent->s.origin);
 			VectorCopy (p->angles, p->ent->s.angles);
+			VectorCopy (p->carry, p->ent->push_carry);
 			if (p->ent->client)
 			{
 				p->ent->client->ps.pmove.delta_angles[YAW] = p->deltayaw;
@@ -624,6 +630,42 @@ void SV_Physics_Pusher (edict_t *ent)
 	}
 }
 
+/*
+=============
+G_FreezeFrame
+
+opentdm-60hz (rework 4, Fable 18.11 Zh1; rework 7): a timeout freezes the
+world on a grid frame, as on a tick at 10 Hz. The thinks due on the frozen
+frame run with the next tick, and a thing in flight waits the rest of the
+frozen window after the timeout (it loses the frozen tick's step, not one
+frame). The moving parts (MOVETYPE_PUSH, MOVETYPE_STOP) keep their own
+frames, as in the DosZone code (rework 7, PO 18.11).
+=============
+*/
+void G_FreezeFrame (void)
+{
+	edict_t	*ent;
+	int		i, div = SECS_TO_FRAMES(0.1f);
+
+	if (div <= 1)
+		return;
+	for (i = 1, ent = g_edicts + 1 ; i < globals.num_edicts ; i++, ent++)
+	{
+		if (!ent->inuse || ent->movetype == MOVETYPE_PUSH || ent->movetype == MOVETYPE_STOP)
+			continue;
+		// the frozen tick's thinks run with the next tick, as at 10 Hz (here
+		// they would run on the first frame after the timeout, up to 83 ms
+		// earlier: an item respawn, a delayed target, a dropped item)
+		if (ent->nextthink == level.framenum)
+			ent->nextthink += div;
+		// a thrown thing in flight loses the frozen tick's step, as at 10 Hz:
+		// it waits the rest of that window after the timeout
+		if ((ent->movetype == MOVETYPE_TOSS || ent->movetype == MOVETYPE_BOUNCE) && !ent->grid_move &&
+			!ent->groundentity)
+			ent->toss_resume_hold = div - 1;
+	}
+}
+
 //==================================================================
 
 /*
@@ -673,6 +715,69 @@ SV_Physics_Toss
 Toss, bounce, and fly movement.  When onground, do nothing.
 =============
 */
+/*
+=============
+SV_TossStep
+
+opentdm-60hz: one world step of a 100 ms toss segment with `remaining`
+steps left in it (counting this one). The trace runs to the end of the
+segment, as the single trace of a 10 Hz step does, so a contact is found
+at the same point; it counts only when it lies within this step's part of
+the way (nothing is touched ahead of time). Otherwise the entity moves by
+this step's part. With remaining 1 this is SV_PushEntity.
+=============
+*/
+static trace_t SV_TossStep (edict_t *ent, int remaining)
+{
+	trace_t	trace;
+	vec3_t	start, end, move;
+	int		mask;
+
+	VectorCopy (ent->s.origin, start);
+	VectorScale (ent->velocity, FRAMETIME * remaining, move);
+	VectorAdd (start, move, end);
+
+retry:
+	if (ent->clipmask)
+		mask = ent->clipmask;
+	else
+		mask = MASK_SOLID;
+
+	trace = gi.trace (start, ent->mins, ent->maxs, end, ent, mask);
+
+	if (remaining > 1 && trace.fraction * remaining >= 1.0f)
+	{
+		// no contact within this step: move by its part of the segment
+		VectorMA (start, FRAMETIME, ent->velocity, ent->s.origin);
+		gi.linkentity (ent);
+		trace.fraction = 1.0f;
+	}
+	else
+	{
+		VectorCopy (trace.endpos, ent->s.origin);
+		gi.linkentity (ent);
+
+		if (trace.fraction != 1.0f)
+		{
+			SV_Impact (ent, &trace);
+
+			// if the pushed entity went away and the pusher is still there
+			if (!trace.ent->inuse && ent->inuse)
+			{
+				// move the pusher back and try again
+				VectorCopy (start, ent->s.origin);
+				gi.linkentity (ent);
+				goto retry;
+			}
+		}
+	}
+
+	if (ent->inuse)
+		G_TouchTriggers (ent);
+
+	return trace;
+}
+
 void SV_Physics_Toss (edict_t *ent)
 {
 	trace_t		trace;
@@ -703,25 +808,86 @@ void SV_Physics_Toss (edict_t *ent)
 
 // if onground, return without moving
 	if ( ent->groundentity )
+	{
+		// a flight that starts again (a kick) starts a new 100 ms segment
+		ent->toss_step = 0;
+		ent->toss_hold = false;
+		ent->toss_resume_hold = 0;
 		return;
+	}
+
+	// opentdm-60hz: after a timeout, the rest of the frozen tick's window
+	// (G_FreezeFrame)
+	if (ent->toss_resume_hold > 0)
+	{
+		ent->toss_resume_hold--;
+		return;
+	}
 
 	VectorCopy (ent->s.origin, old_origin);
 
-	SV_CheckVelocity (ent);
+	if (ent->movetype == MOVETYPE_TOSS || ent->movetype == MOVETYPE_BOUNCE)
+	{
+		/*
+		opentdm-60hz: the ballistics of 10 Hz at any world rate. A toss or
+		bounce entity flies in its own 100 ms segments, counted in world
+		steps from its launch: the gravity of the whole segment is applied
+		once at its start, as one 10 Hz step does, and the segment's
+		velocity is moved over its world steps (collision, touches and
+		triggers at the world rate). After a contact the rest of the segment
+		is held, as a 10 Hz step loses the rest of its move. At 10 Hz every
+		step is a whole segment and this is the original code.
+		*/
+		// a grid projectile's step is a whole 100 ms segment (G_RunGridEntity)
+		int	steps = ent->grid_move ? 1 : SECS_TO_FRAMES(0.1f);
+		int	step = ent->toss_step;
 
-// add gravity
-	if (ent->movetype != MOVETYPE_FLY
-	&& ent->movetype != MOVETYPE_FLYMISSILE)
-		SV_AddGravity (ent);
+		if (steps < 1)
+			steps = 1;
+		if (step >= steps)
+			step = 0;
+		ent->toss_step = (step + 1) % steps;
 
-// move angles
-	VectorMA (ent->s.angles, FRAMETIME, ent->avelocity, ent->s.angles);
+		if (step == 0)
+		{
+			ent->toss_hold = false;
+			SV_CheckVelocity (ent);
+			ent->velocity[2] -= ent->gravity * sv_gravity->value * 0.1f;
+		}
 
-// move origin
-	VectorScale (ent->velocity, FRAMETIME, move);
-	trace = SV_PushEntity (ent, move);
-	if (!ent->inuse)
-		return;
+		VectorMA (ent->s.angles, FRAMETIME, ent->avelocity, ent->s.angles);
+
+		if (ent->toss_hold)
+		{
+			trace.fraction = 1;	// no move: the rest of this segment is lost
+		}
+		else
+		{
+			trace = SV_TossStep (ent, steps - step);
+			if (!ent->inuse)
+				return;
+			if (trace.fraction < 1)
+				ent->toss_hold = true;
+		}
+	}
+	else
+	{
+		SV_CheckVelocity (ent);
+
+	// add gravity
+		if (ent->movetype != MOVETYPE_FLY
+		&& ent->movetype != MOVETYPE_FLYMISSILE)
+			SV_AddGravity (ent);
+
+	// move angles
+		VectorMA (ent->s.angles, FRAMETIME, ent->avelocity, ent->s.angles);
+
+	// move origin
+		VectorScale (ent->velocity, FRAMETIME, move);
+		trace = SV_PushEntity (ent, move);
+		if (!ent->inuse)
+			return;
+	}
 
 	if (trace.fraction < 1)
 	{
@@ -828,6 +994,42 @@ G_RunEntity
 
 ================
 */
+/*
+================
+G_GridProjectile, G_RunGridEntity
+
+opentdm-60hz: a weapon projectile (bolt, grenade, hand grenade, rocket,
+BFG) lives on the 100 ms grid, as at 10 Hz: its physics, touches and
+thinks run only on the grid frames (FRAMESYNC), each a whole 100 ms
+step, so it hits, bounces and explodes where and when it does on a 10 Hz
+server. It is not sent before its first step (a 10 Hz client first sees
+it after that step); between steps faster clients get positions along
+the step (G_CustomizeEntityToClient).
+================
+*/
+void G_GridProjectile (edict_t *ent)
+{
+	ent->grid_move = true;
+	ent->grid_frame = -1;
+	VectorCopy (ent->s.origin, ent->grid_from);
+	VectorCopy (ent->s.angles, ent->grid_from_angles);
+	ent->svflags |= SVF_NOCLIENT;
+}
+
+void G_RunGridEntity (edict_t *ent)
+{
+	float	frametime = FRAMETIME;
+
+	VectorCopy (ent->s.origin, ent->grid_from);
+	VectorCopy (ent->s.angles, ent->grid_from_angles);
+	ent->grid_frame = level.realframenum;
+	ent->svflags &= ~SVF_NOCLIENT;
+
+	FRAMETIME = 0.1f;
+	G_RunEntity (ent);
+	FRAMETIME = frametime;
+}
+
 void G_RunEntity (edict_t *ent)
 {
 	if (ent->prethink)

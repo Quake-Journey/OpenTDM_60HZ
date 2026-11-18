@@ -933,6 +933,7 @@ void SV_SendClientMessages(void)
             write_datagram_new(client);
         else
             write_datagram_old(client);
+        SV_MotionDiagSent(client);
 
 advance:
         // advance for next frame

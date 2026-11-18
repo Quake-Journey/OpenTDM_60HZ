@@ -530,7 +530,9 @@ void func_object_touch (edict_t *self, edict_t *other, cplane_t *plane, csurface
 		return;
 	if (other->takedamage == DAMAGE_NO)
 		return;
-	T_Damage (other, self, self, vec3_origin, self->s.origin, vec3_origin, self->dmg, 1, 0, MOD_CRUSH);
+	// at most one hit per 0.1 s per pair, as at 10 Hz (q2trek/opentdm 69fc811)
+	if (G_CrushAllowed (self, other))
+		T_Damage (other, self, self, vec3_origin, self->s.origin, vec3_origin, self->dmg, 1, 0, MOD_CRUSH);
 }
 
 void func_object_release (edict_t *self)
@@ -1012,7 +1014,7 @@ void misc_viper_bomb_prethink (edict_t *self)
 
 	diff = self->s.angles[2];
 	vectoangles (v, self->s.angles);
-	self->s.angles[2] = diff + 10;
+	self->s.angles[2] = diff + 100.0f * FRAMETIME;	// 10 degrees per 100 ms (q2trek/opentdm 6ffeb16)
 }
 
 void misc_viper_bomb_use (edict_t *self, edict_t *other, edict_t *activator)

@@ -355,6 +355,7 @@ void fire_blaster (edict_t *self, vec3_t start, vec3_t dir, int damage, int spee
 	bolt->classname = "bolt";
 	if (hyper)
 		bolt->spawnflags = 1;
+	G_GridProjectile (bolt);
 	gi.linkentity (bolt);
 
 	tr = gi.trace (self->s.origin, NULL, NULL, bolt->s.origin, bolt, MASK_SHOT);
@@ -495,6 +496,7 @@ void fire_grenade (edict_t *self, vec3_t start, vec3_t aimdir, int damage, int s
 	grenade->classname = "grenade";
 	grenade->enttype = ENT_GRENADE;
 
+	G_GridProjectile (grenade);
 	gi.linkentity (grenade);
 
 	CheckSolidExplode (grenade);
@@ -545,6 +547,7 @@ void fire_grenade2 (edict_t *self, vec3_t start, vec3_t aimdir, int damage, int 
 	else
 	{
 		gi.sound (self, CHAN_WEAPON, gi.soundindex ("weapons/hgrent1a.wav"), 1, ATTN_NORM, 0);
+		G_GridProjectile (grenade);
 		gi.linkentity (grenade);
 
 		CheckSolidExplode (grenade);
@@ -620,6 +623,7 @@ void fire_rocket (edict_t *self, vec3_t start, vec3_t dir, int damage, int speed
 	rocket->s.sound = gi.soundindex ("weapons/rockfly.wav");
 	rocket->classname = "rocket";
 
+	G_GridProjectile (rocket);
 	gi.linkentity (rocket);
 
 	CheckSolidExplode (rocket);
@@ -760,14 +764,15 @@ void bfg_touch (edict_t *self, edict_t *other, cplane_t *plane, csurface_t *surf
 	gi.sound (self, CHAN_VOICE, gi.soundindex ("weapons/bfg__x1b.wav"), 1, ATTN_NORM, 0);
 	self->solid = SOLID_NOT;
 	self->touch = NULL;
-	VectorMA (self->s.origin, -1 * FRAMETIME, self->velocity, self->s.origin);
+	// back off 100 ms of flight, as at 10 Hz: the secondary explosion hurts from there (q2trek/opentdm aad11e7)
+	VectorMA (self->s.origin, -0.1f, self->velocity, self->s.origin);
 	VectorClear (self->velocity);
 	self->s.modelindex = gi.modelindex ("sprites/s_bfg3.sp2");
 	self->s.frame = 0;
 	self->s.sound = 0;
 	self->s.effects &= ~EF_ANIM_ALLFAST;
 	self->think = bfg_explode;
-	self->nextthink = level.framenum + 1;
+	self->nextthink = level.framenum + SECS_TO_FRAMES(0.1f);
 	self->enemy = other;
 
 	gi.linkentity (self);
@@ -884,10 +889,11 @@ void fire_bfg (edict_t *self, vec3_t start, vec3_t dir, int damage, int speed, f
 	bfg->s.sound = gi.soundindex ("weapons/bfg__l1a.wav");
 
 	bfg->think = bfg_think;
-	bfg->nextthink = level.framenum + 1;
+	bfg->nextthink = level.framenum + SECS_TO_FRAMES(0.1f);	// first laser after 100 ms (q2trek/opentdm aad11e7)
 	bfg->teammaster = bfg;
 	bfg->teamchain = NULL;
 
+	G_GridProjectile (bfg);
 	gi.linkentity (bfg);
 
 	CheckSolidExplode (bfg);

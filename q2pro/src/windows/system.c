@@ -22,6 +22,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "common/prompt.h"
 #include "shared/atomic.h"
 
+#include <mmsystem.h>    // timeBeginPeriod (sys_timerperiod)
+
 #if USE_WINSVC
 #include <winsvc.h>
 #include <setjmp.h>
@@ -41,6 +43,9 @@ static LARGE_INTEGER            timer_freq;
 static DWORD                    main_thread_id;
 
 static cvar_t                   *sys_exitonerror;
+static cvar_t                   *sys_timerperiod;
+static cvar_t                   *sys_nothrottle;
+static UINT                     timer_period;
 
 cvar_t  *sys_basedir;
 cvar_t  *sys_libdir;
@@ -868,6 +873,16 @@ unsigned Sys_Milliseconds(void)
     return tm.QuadPart * 1000ULL / timer_freq.QuadPart;
 }
 
+// microseconds of the process clock (QPC), without 64-bit overflow
+uint64_t Sys_Microseconds(void)
+{
+    LARGE_INTEGER tm;
+    uint64_t q, f = timer_freq.QuadPart;
+    QueryPerformanceCounter(&tm);
+    q = tm.QuadPart;
+    return q / f * 1000000ULL + q % f * 1000000ULL / f;
+}
+
 void Sys_AddDefaultConfig(void)
 {
 }
@@ -889,6 +904,75 @@ const char *Sys_ErrorString(int err)
         Q_snprintf(buf, sizeof(buf), "unknown error %d", err);
 
     return buf;
+}
+
+static void sys_timerperiod_release(void)
+{
+    if (timer_period) {
+        timeEndPeriod(timer_period);
+        timer_period = 0;
+    }
+}
+
+static void sys_timerperiod_changed(cvar_t *self)
+{
+    UINT want = Q_clip(self->integer, 0, 15);
+
+    if (want == timer_period)
+        return;
+    sys_timerperiod_release();
+    if (want && timeBeginPeriod(want) == TIMERR_NOERROR)
+        timer_period = want;
+    else if (want)
+        Com_WPrintf("timeBeginPeriod(%u) failed\n", want);
+}
+
+/*
+opentdm-60hz: Windows 11 may ignore the timer resolution request of a
+process it considers invisible to the user (a dedicated server has no
+window) and may run it in EcoQoS: the 1 ms wait resolution of
+sys_timerperiod is then not applied and the world steps up to one default
+timer tick (15.6 ms) late. sys_nothrottle 1 asks Windows not to throttle
+this process (SetProcessInformation, ProcessPowerThrottling: execution
+speed and timer resolution not throttled); 0 leaves the decision to Windows.
+On a Windows without these flags the call fails and nothing changes.
+*/
+typedef struct {
+    ULONG version, control_mask, state_mask;
+} q2_power_throttling_t;
+
+typedef BOOL (WINAPI *q2_set_process_information_t)(HANDLE, int, LPVOID, DWORD);
+
+#define Q2_PROCESS_POWER_THROTTLING         4       // ProcessPowerThrottling
+#define Q2_THROTTLE_EXECUTION_SPEED         0x1
+#define Q2_THROTTLE_IGNORE_TIMER_RESOLUTION 0x4
+
+static bool set_power_throttling(ULONG control)
+{
+    static q2_set_process_information_t set_info;
+    q2_power_throttling_t st = { 1, control, 0 };
+
+    if (!set_info) {
+        HMODULE k32 = GetModuleHandleA("kernel32.dll");
+        if (k32)
+            set_info = (q2_set_process_information_t)(void *)GetProcAddress(k32, "SetProcessInformation");
+        if (!set_info)
+            return false;
+    }
+    return set_info(GetCurrentProcess(), Q2_PROCESS_POWER_THROTTLING, &st, sizeof(st));
+}
+
+static void sys_nothrottle_changed(cvar_t *self)
+{
+    if (!self->integer) {
+        set_power_throttling(0);        // Windows decides
+        return;
+    }
+    if (set_power_throttling(Q2_THROTTLE_EXECUTION_SPEED | Q2_THROTTLE_IGNORE_TIMER_RESOLUTION))
+        return;
+    // Windows 10: no timer resolution flag
+    if (!set_power_throttling(Q2_THROTTLE_EXECUTION_SPEED))
+        Com_DPrintf("sys_nothrottle: not supported by this Windows (%s)\n", Sys_ErrorString(GetLastError()));
 }
 
 /*
@@ -914,6 +998,20 @@ void Sys_Init(void)
     sys_homedir = Cvar_Get("homedir", "", CVAR_NOSET);
 
     sys_exitonerror = Cvar_Get("sys_exitonerror", "0", 0);
+
+    // opentdm-60hz: a dedicated server sleeps on its sockets with a ms
+    // timeout, which Windows rounds to its default ~15.6 ms timer: a 60 Hz
+    // world then steps 15.6 / 31 ms apart. Request a finer wait resolution
+    // for the life of the process (0 = system default, for comparisons).
+    if (COM_DEDICATED) {
+        sys_timerperiod = Cvar_Get("sys_timerperiod", "1", 0);
+        sys_timerperiod->changed = sys_timerperiod_changed;
+        sys_timerperiod_changed(sys_timerperiod);
+        atexit(sys_timerperiod_release);
+        sys_nothrottle = Cvar_Get("sys_nothrottle", "1", 0);
+        sys_nothrottle->changed = sys_nothrottle_changed;
+        sys_nothrottle_changed(sys_nothrottle);
+    }
 
 #if USE_WINSVC
     Cmd_AddCommand("installservice", Sys_InstallService_f);

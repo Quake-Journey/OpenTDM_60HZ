@@ -217,6 +217,19 @@ Called by ClientBeginServerFrame and ClientThink
 */
 void Think_Weapon (edict_t *ent)
 {
+	int		framenum;
+
+	/*
+	opentdm-60hz: one weapon step per 100 ms window, as at 10 Hz. It runs
+	from ClientBeginServerFrame on the window's grid frame, or earlier
+	from ClientThink when a press arrives (weapon_thunk then skips the
+	grid frame's step). Its game clock is the coming grid frame's, as a
+	10 Hz step sees the coming tick: timers it sets (grenades, refire,
+	projectile lives) fall on the grid as at 10 Hz.
+	*/
+	framenum = level.framenum;
+	level.framenum = G_WindowFrame (framenum);
+
 	// if just died, put the weapon away
 	if (ent->health < 1)
 	{
@@ -226,7 +239,10 @@ void Think_Weapon (edict_t *ent)
 
 	// don't run weapons at all during timeout, preserve reload frame etc
 	if (tdm_match_status == MM_TIMEOUT)
+	{
+		level.framenum = framenum;
 		return;
+	}
 
 	//r1: don't allow any attack during countdown
 	if (tdm_match_status == MM_COUNTDOWN)
@@ -234,12 +250,6 @@ void Think_Weapon (edict_t *ent)
 		ent->client->buttons &= ~BUTTON_ATTACK;
 		ent->client->latched_buttons &= ~BUTTON_ATTACK;
 	}
-
-	// variable FPS support
-	if (ent->client->next_weapon_think > level.framenum)
-		return;
-
-	ent->client->next_weapon_think = level.framenum + (SECS_TO_FRAMES(0.1f));
 
 	// call active weapon think routine
 	if (ent->client->weapon && ent->client->weapon->weaponthink)
@@ -253,8 +263,11 @@ void Think_Weapon (edict_t *ent)
 			is_silenced = MZ_SILENCED;
 		else
 			is_silenced = 0;
+
 		ent->client->weapon->weaponthink (ent);
 	}
+
+	level.framenum = framenum;
 }
 
 
@@ -1410,7 +1423,7 @@ void weapon_bfg_fire (edict_t *ent)
 	// make a big pitch kick with an inverse fall
 	ent->client->v_dmg_pitch = -40;
 	ent->client->v_dmg_roll = crandom()*8;
-	ent->client->v_dmg_framenum = level.framenum + DAMAGE_FRAMES;
+	ent->client->v_dmg_framenum = level.realframenum + DAMAGE_FRAMES;	// opentdm-60hz: view presentation runs on real frames, also in a timeout
 
 	VectorSet(offset, 8, 8, ent->viewheight-8);
 	P_ProjectSource (ent->client, ent->s.origin, offset, forward, right, start);

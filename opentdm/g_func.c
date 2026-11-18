@@ -111,9 +111,27 @@ void Move_Begin (edict_t *ent)
 
 void Think_AccelMove (edict_t *ent);
 
+// final segment of Think_AccelMove: its speeds are in units per 100 ms
+// controller interval, the remainder too (not one world frame, unlike the
+// linear Move_Final) (q2trek/opentdm df97fc9)
+static void AccelMove_Final (edict_t *ent)
+{
+	if (ent->moveinfo.remaining_distance == 0)
+	{
+		Move_Done (ent);
+		return;
+	}
+
+	VectorScale (ent->moveinfo.dir, ent->moveinfo.remaining_distance / 0.1f, ent->velocity);
+
+	ent->think = Move_Done;
+	ent->nextthink = level.framenum + SECS_TO_FRAMES(0.1f);
+}
+
 void Move_Calc (edict_t *ent, vec3_t dest, void(*func)(edict_t*))
 {
 	VectorClear (ent->velocity);
+	VectorClear (ent->push_carry);	// a new path: no remainder of the old one (q2trek/opentdm 1f0f101)
 	VectorSubtract (dest, ent->s.origin, ent->moveinfo.dir);
 	ent->moveinfo.remaining_distance = VectorNormalize (ent->moveinfo.dir);
 	ent->moveinfo.endfunc = func;
@@ -343,7 +361,7 @@ void Think_AccelMove (edict_t *ent)
 	// will the entire move complete on next frame?
 	if (ent->moveinfo.remaining_distance <= ent->moveinfo.current_speed)
 	{
-		Move_Final (ent);
+		AccelMove_Final (ent);
 		return;
 	}
 
@@ -416,7 +434,9 @@ void plat_blocked (edict_t *self, edict_t *other)
 		return;
 	}
 
-	T_Damage (other, self, self, vec3_origin, other->s.origin, vec3_origin, self->dmg, 1, 0, MOD_CRUSH);
+	// at most one hit per 0.1 s per pair, as at 10 Hz (q2trek/opentdm 69fc811)
+	if (G_CrushAllowed (self, other))
+		T_Damage (other, self, self, vec3_origin, other->s.origin, vec3_origin, self->dmg, 1, 0, MOD_CRUSH);
 
 	if (self->moveinfo.state == STATE_UP)
 		plat_go_down (self);
@@ -595,7 +615,9 @@ STOP mean it will stop moving instead of pushing entities
 
 void rotating_blocked (edict_t *self, edict_t *other)
 {
-	T_Damage (other, self, self, vec3_origin, other->s.origin, vec3_origin, self->dmg, 1, 0, MOD_CRUSH);
+	// at most one hit per 0.1 s per pair, as at 10 Hz (q2trek/opentdm 69fc811)
+	if (G_CrushAllowed (self, other))
+		T_Damage (other, self, self, vec3_origin, other->s.origin, vec3_origin, self->dmg, 1, 0, MOD_CRUSH);
 }
 
 void rotating_touch (edict_t *self, edict_t *other, cplane_t *plane, csurface_t *surf)
@@ -1089,7 +1111,9 @@ void door_blocked  (edict_t *self, edict_t *other)
 		return;
 	}
 
-	T_Damage (other, self, self, vec3_origin, other->s.origin, vec3_origin, self->dmg, 1, 0, MOD_CRUSH);
+	// at most one hit per 0.1 s per pair, as at 10 Hz (q2trek/opentdm 69fc811)
+	if (G_CrushAllowed (self, other))
+		T_Damage (other, self, self, vec3_origin, other->s.origin, vec3_origin, self->dmg, 1, 0, MOD_CRUSH);
 
 	if (self->spawnflags & DOOR_CRUSHER)
 		return;
@@ -1781,7 +1805,7 @@ These can used but not touched.
 void func_timer_think (edict_t *self)
 {
 	G_UseTargets (self, self->activator);
-	self->nextthink = level.framenum + SECS_TO_FRAMES(self->wait + crandom() * self->random);
+	self->nextthink = G_WindowFrame (level.framenum) + G_GridFrames (self->wait + crandom() * self->random);	// opentdm-60hz
 }
 
 void func_timer_use (edict_t *self, edict_t *other, edict_t *activator)
@@ -1797,7 +1821,7 @@ void func_timer_use (edict_t *self, edict_t *other, edict_t *activator)
 
 	// turn it on
 	if (self->delay)
-		self->nextthink = level.framenum + SECS_TO_FRAMES(self->delay);
+		self->nextthink = G_WindowFrame (level.framenum) + G_GridFrames (self->delay);	// opentdm-60hz
 	else
 		func_timer_think (self);
 }
@@ -1812,13 +1836,13 @@ void SP_func_timer (edict_t *self)
 
 	if (self->random >= self->wait)
 	{
-		self->random = self->wait - FRAMETIME;
+		self->random = self->wait - 0.1f;	// opentdm-60hz: one 10 Hz tick
 		gi.dprintf("func_timer at %s has random >= wait\n", vtos(self->s.origin));
 	}
 
 	if (self->spawnflags & 1)
 	{
-		self->nextthink = level.framenum + SECS_TO_FRAMES(1.0f + st.pausetime + self->delay + self->wait + crandom() * self->random);
+		self->nextthink = G_WindowFrame (level.framenum) + G_GridFrames (1.0f + st.pausetime + self->delay + self->wait + crandom() * self->random);	// opentdm-60hz
 		self->activator = self;
 	}
 

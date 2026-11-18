@@ -38,13 +38,41 @@ void SV_ClientReset(client_t *client)
     memset(&client->lastcmd, 0, sizeof(client->lastcmd));
 }
 
+#if USE_FPS
+// sv_fps as written: one of 10, 20, 30, 40, 50, 60, digits only
+static bool parse_frame_rate(const char *s, int *rate)
+{
+    int v = 0, digits = 0;
+
+    while (*s >= '0' && *s <= '9' && digits < 3) {
+        v = v * 10 + (*s++ - '0');
+        digits++;
+    }
+    if (!digits || *s || v < BASE_FRAMERATE || v > BASE_FRAMERATE * MAX_FRAMEDIV || v % BASE_FRAMERATE)
+        return false;
+    *rate = v;
+    return true;
+}
+#endif
+
 static void set_frame_time(void)
 {
 #if USE_FPS
-    if (g_features->integer & GMF_VARIABLE_FPS)
-        sv.frametime = Com_ComputeFrametime(sv_fps->integer);
-    else
-        sv.frametime = Com_ComputeFrametime(BASE_FRAMERATE);
+    // opentdm-60hz: an unsupported request is refused with a message and the
+    // previous rate kept, never rounded silently (25 used to run 20, 60.5 60)
+    static int last_rate = BASE_FRAMERATE;
+    int rate = BASE_FRAMERATE;
+
+    if (g_features->integer & GMF_VARIABLE_FPS) {
+        if (parse_frame_rate(sv_fps->string, &rate)) {
+            last_rate = rate;
+        } else {
+            Com_EPrintf("sv_fps \"%s\" is not supported (allowed: 10, 20, 30, 40, 50, 60); keeping %d.\n",
+                        sv_fps->string, last_rate);
+            rate = last_rate;
+        }
+    }
+    sv.frametime = Com_ComputeFrametime(rate);
 
     sv.framerate = sv.frametime.div * BASE_FRAMERATE;
 
@@ -123,6 +151,10 @@ void SV_SpawnServer(const mapcmd_t *cmd)
     SV_BroadcastCommand("changing map=%s\n", cmd->server);
     SV_SendClientMessages();
     SV_SendAsyncPackets();
+
+    // close an automatic match MVD before the world is replaced (its last
+    // frame and the match table written first)
+    SV_MvdMapChanging();
 
     // free current level
     CM_FreeMap(&sv.cm);

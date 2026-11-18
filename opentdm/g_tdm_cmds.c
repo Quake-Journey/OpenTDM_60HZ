@@ -758,7 +758,7 @@ void TDM_Win_f (edict_t *ent)
 	}
 
 	level.timeout_end_framenum = 0;
-	level.match_resume_framenum = level.realframenum + 1;
+	level.match_resume_framenum = G_WindowFrame (level.realframenum) + SECS_TO_FRAMES(0.1f);	// opentdm-60hz: one 10 Hz tick
 }
 
 /*
@@ -2083,8 +2083,8 @@ void TDM_Ghost_f (edict_t *ent)
 
 	code = strtoul (gi.args(), NULL, 0);
 
-	//to prevent brute forcing :)
-	if (TDM_RateLimited (ent, 2))
+	//to prevent brute forcing :) - 0.2 s at any server rate (q2trek/opentdm 9bac71b)
+	if (TDM_RateLimited (ent, SECS_TO_FRAMES(0.2f)))
 		return;
 
 	if (!TDM_ProcessJoinCode (ent, code))

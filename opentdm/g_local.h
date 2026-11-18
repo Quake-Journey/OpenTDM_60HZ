@@ -226,6 +226,10 @@ extern int		SERVER_FPS;
 //define for variable frametime support
 #define SECS_TO_FRAMES(seconds)	(int)((seconds)* SERVER_FPS)
 #define FRAMES_TO_SECS(frames)	(int)((frames) * FRAMETIME)
+// first real frame of each 100 ms; real frames keep running in a timeout
+#define FRAMESYNC				((level.realframenum % (int)(0.1f * SERVER_FPS)) == 0)
+// opentdm-60hz: the game clock stands still: a timeout, from its first grid frame on
+#define GAME_FROZEN				(tdm_match_status == MM_TIMEOUT && level.timeout_frozen)
 
 // memory tags to allow dynamic memory to be cleaned up
 #define	TAG_GAME	765		// clear when unloading the dll
@@ -496,6 +500,8 @@ typedef struct
 	int			server_features;
 } game_locals_t;
 
+#define MAX_CRUSH	64
+
 
 //
 // this structure is cleared as each map is entered
@@ -539,6 +545,15 @@ typedef struct
 	edict_t			*spawns[TDM_MAX_MAP_SPAWNPOINTS];
 
 	time_t			spawntime;
+
+	// world-driven continuous crush: next damage frame of each source/victim pair
+	struct {
+		edict_t		*self, *other;
+		int			framenum;
+	} crush[MAX_CRUSH];
+	int				crush_overflows;		// hits through the full table's per-victim limit, this map
+	int				crush_report_framenum;	// g_crushdiag: next message (realframenum)
+	qboolean		timeout_frozen;			// opentdm-60hz: a timeout has frozen the game clock (from a grid frame)
 } level_locals_t;
 
 
@@ -792,6 +807,7 @@ extern	cvar_t	*g_teleporter_nofreeze;
 
 extern	cvar_t	*g_overtime;
 extern	cvar_t	*g_tie_mode;
+extern	cvar_t	*g_crushdiag;
 extern	cvar_t	*g_gamemode;
 extern	cvar_t	*g_respawn_time;
 extern	cvar_t	*g_max_timeout;
@@ -925,6 +941,9 @@ void	G_SetMovedir (vec3_t angles, vec3_t movedir);
 void	G_InitEdict (edict_t *e);
 edict_t	*G_Spawn (void);
 void	G_FreeEdict (edict_t *e);
+qboolean	G_CrushAllowed (edict_t *self, edict_t *other);
+int		G_WindowFrame (int framenum);
+int		G_GridFrames (float seconds);
 
 void	G_StuffCmd (edict_t *e, const char *fmt, ...) __attribute__ ((format (printf, 2, 3)));
 void	G_UnicastSound (edict_t *ent, int index, qboolean reliable);
@@ -1049,6 +1068,9 @@ void M_ChangeYaw (edict_t *ent);
 // g_phys.c
 //
 void G_RunEntity (edict_t *ent);
+void G_FreezeFrame (void);
+void G_GridProjectile (edict_t *ent);
+void G_RunGridEntity (edict_t *ent);
 
 
 //
@@ -1090,6 +1112,12 @@ qboolean TDM_Command (const char *cmd, edict_t *ent);
 void TDM_CheckMatchStart (void);
 void TDM_CheckTimes (void);
 void TDM_ResetGameState (void);
+
+// g_tdm_mvd.c: automatic match MVD (sv_mvd_autorecord_matches, opentdm-60hz)
+void TDM_MvdInit (void);
+void TDM_MvdBeginMatch (void);
+void TDM_MvdEndMatch (const char *outcome);
+void TDM_MvdCheck (void);
 char *TDM_ScoreBoardString (edict_t *ent);
 void TDM_MapChanged (void);
 void TDM_LeftTeam (edict_t *ent, qboolean notify);
@@ -1607,8 +1635,8 @@ struct gclient_s
 	unsigned	last_activity_frame;
 
 	int32		last_model_frame;
+	float		powerup_blend[4];	// opentdm-60hz: the power-up view tint chosen on the last grid frame
 	int			next_animation_frame;
-	unsigned	next_weapon_think;
 	vec3_t		saved_angles;
 };
 
@@ -1740,6 +1768,7 @@ struct edict_s
 	edict_t		*activator;
 	edict_t		*groundentity;
 	int			groundentity_linkcount;
+	int			crush_framenum;		// G_CrushAllowed on a full table: next damage frame of this victim
 	edict_t		*teamchain;
 	edict_t		*teammaster;
 
@@ -1771,6 +1800,14 @@ struct edict_s
 
 	// common data blocks
 	moveinfo_t		moveinfo;
+	vec3_t			push_carry;		// SV_Push 1/8 quantization remainder, in 1/8 units
+	int				toss_step;		// opentdm-60hz: world step within the current 100 ms toss segment
+	qboolean		toss_hold;		// opentdm-60hz: contact in this segment, rest of it held
+	int				toss_resume_hold;	// opentdm-60hz: world frames to wait after a timeout
+	qboolean		grid_move;		// opentdm-60hz: weapon projectile: physics and thinks on the 100 ms grid
+	vec3_t			grid_from;		// opentdm-60hz: origin before its last grid step
+	vec3_t			grid_from_angles;	// opentdm-60hz: angles before its last grid step
+	int				grid_frame;		// opentdm-60hz: realframenum of its last grid step (-1: none yet)
 	//monsterinfo_t	monsterinfo;
 
 	enttype_t	enttype;
@@ -1792,3 +1829,6 @@ struct edict_s
 
 // inform game DLL of disconnects between level changes
 #define GMF_WANT_ALL_DISCONNECTS 8
+
+// game supports variable server FPS (q2pro); the engine sets it in sv_features when it does too
+#define GMF_VARIABLE_FPS	0x800

@@ -40,7 +40,7 @@
 #define H_SVC_TEMP_ENTITY 3
 #define H_SVC_LAYOUT 4
 #define H_SVC_STUFFTEXT 11
-#ifdef HARNESS_OPENTDM
+#if defined HARNESS_OPENTDM && !defined HARNESS_LOCAL_BASE
 _Static_assert(H_SVC_LAYOUT == SVC_LAYOUT && H_SVC_STUFFTEXT == SVC_STUFFTEXT, "svc numbers");
 #else
 _Static_assert(H_SVC_LAYOUT == svc_layout && H_SVC_STUFFTEXT == svc_stufftext, "svc numbers");
@@ -184,10 +184,14 @@ static void imp_bprintf(int level, const char *fmt, ...)
     h_log_text(h_bprints, &h_nbprints, 4096, 0, text);
     if (h_verbose) printf("    [bprint] %s", text);
 }
+/* developer/console prints: counted, the last one kept (game diagnostics) */
+static int h_ndprints;
+static char h_last_dprint[256];
 static void imp_dprintf(const char *fmt, ...)
 {
-    if (!h_verbose) return;
-    va_list ap; va_start(ap, fmt); printf("    [dprint] "); vprintf(fmt, ap); va_end(ap);
+    va_list ap; va_start(ap, fmt); vsnprintf(h_last_dprint, sizeof(h_last_dprint), fmt, ap); va_end(ap);
+    h_ndprints++;
+    if (h_verbose) printf("    [dprint] %s", h_last_dprint);
 }
 /* client prints and stufftext/layout unicasts (the text a client gets),
  * with the frame and the receiving entity (-1: everyone) */
@@ -273,13 +277,32 @@ static int h_ninline;
 
 /* world solid boxes; entity 0 is the world */
 static hbox_t h_world[32];
+static int h_world_contents[32];    /* CONTENTS_SOLID, or CONTENTS_WATER (engine builds) */
+static float h_world_plane[32][4];  /* oblique plane of a world box (engine builds): normal, dist; zero: none */
 static int h_nworld;
 
 static void h_add_world(float x0, float y0, float z0, float x1, float y1, float z1)
 {
+    h_world_contents[h_nworld] = CONTENTS_SOLID;
     hbox_t *b = &h_world[h_nworld++];
     VectorSet(b->mins, x0, y0, z0);
     VectorSet(b->maxs, x1, y1, z1);
+}
+
+/* a world water volume (not solid); waterlevel needs the engine Pmove */
+static void h_add_water(float x0, float y0, float z0, float x1, float y1, float z1)
+{
+    h_add_world(x0, y0, z0, x1, y1, z1);
+    h_world_contents[h_nworld - 1] = CONTENTS_WATER;
+}
+
+/* a solid world box cut by the plane normal . p <= dist (a slope; engine builds) */
+static __attribute__((unused)) void h_add_slope(float x0, float y0, float z0, float x1, float y1, float z1,
+                                                float nx, float ny, float nz, float dist)
+{
+    h_add_world(x0, y0, z0, x1, y1, z1);
+    float *p = h_world_plane[h_nworld - 1];
+    p[0] = nx; p[1] = ny; p[2] = nz; p[3] = dist;
 }
 
 static int h_add_inline(float x0, float y0, float z0, float x1, float y1, float z1)
@@ -293,6 +316,8 @@ static int h_add_inline(float x0, float y0, float z0, float x1, float y1, float 
 #ifdef HARNESS_ENGINE
 void he_init(void);
 void he_load_map(const float *boxes, int nboxes, const float *inl, int ninline);
+void he_set_world_contents(const int *contents);
+void he_set_world_planes(const float *planes);
 void he_set_game(void *exports);
 void he_inline_bounds(const char *name, float *mins, float *maxs);
 trace_t he_trace(const vec3_t start, const vec3_t mins, const vec3_t maxs, const vec3_t end, edict_t *pass, int mask);
@@ -303,8 +328,14 @@ void he_unlink(edict_t *ent);
 void he_pmove(void *pm);
 #endif
 
+/* parity scenarios: the first link (creation) and the unlink (removal)
+ * of an edict, as they happen; NULL when unused */
+static void (*h_link_hook)(edict_t *ent);
+static void (*h_unlink_hook)(edict_t *ent);
+
 static void imp_linkentity(edict_t *ent)
 {
+    if (h_link_hook && !ent->linkcount && ent->inuse) h_link_hook(ent);
 #ifdef HARNESS_ENGINE
     he_link(ent);
     return;
@@ -338,6 +369,7 @@ static void imp_linkentity(edict_t *ent)
 
 static void imp_unlinkentity(edict_t *ent)
 {
+    if (h_unlink_hook && ent->inuse) h_unlink_hook(ent);
 #ifdef HARNESS_ENGINE
     he_unlink(ent);
 #endif
@@ -438,7 +470,8 @@ static trace_t imp_trace(const vec3_t start, const vec3_t mins_in, const vec3_t 
     tr.surface = &h_nullsurf;
     if (mask & CONTENTS_SOLID)
         for (int i = 0; i < h_nworld; i++)
-            h_clip_box(&tr, start, end, mins, maxs, h_world[i].mins, h_world[i].maxs, EDICT(0), CONTENTS_SOLID);
+            if (h_world_contents[i] == CONTENTS_SOLID)
+                h_clip_box(&tr, start, end, mins, maxs, h_world[i].mins, h_world[i].maxs, EDICT(0), CONTENTS_SOLID);
     for (int n = 1; n < ge->num_edicts; n++) {
         edict_t *e = EDICT(n);
         if (!e->inuse || !h_linked[n] || e == passent) continue;
@@ -464,7 +497,7 @@ static int imp_pointcontents(const vec3_t p)
         const hbox_t *b = &h_world[i];
         if (p[0] > b->mins[0] && p[0] < b->maxs[0] && p[1] > b->mins[1] && p[1] < b->maxs[1] &&
             p[2] > b->mins[2] && p[2] < b->maxs[2])
-            return CONTENTS_SOLID;
+            return h_world_contents[i];
     }
     return 0;
 }
@@ -709,6 +742,8 @@ static void h_start(const char *entities)
     imp_cvar("gamedir", HARNESS_MOD, 0);
 #ifdef HARNESS_ENGINE
     /* modelindex of "*N" is N + 1 (the engine hull lookup), 1 is the map */
+    he_set_world_contents(h_world_contents);
+    he_set_world_planes(&h_world_plane[0][0]);
     he_load_map(&h_world[0].mins[0], h_nworld, &h_inline[0].mins[0], h_ninline);
     h_models[1] = strdup("maps/harness.bsp");
     for (int k = 1; k <= h_ninline; k++) h_models[k + 1] = strdup(va("*%d", k));
@@ -716,6 +751,15 @@ static void h_start(const char *entities)
     ge = GetGameAPI(&h_imports);
     if (ge->apiversion != 3) imp_error("apiversion %d", ge->apiversion);
     ge->Init();
+#ifdef HARNESS_OPENTDM
+    /* InitGame seeds the generator with the time; the map load then
+     * shuffles the spawn points with it. A fixed seed makes every run of a
+     * scenario the same (opentdm-60hz candidate 4 parity) */
+    {
+        void init_genrand(uint32 s);
+        init_genrand(20261117);
+    }
+#endif
 #ifdef HARNESS_ENGINE
     he_set_game(ge);
 #endif
@@ -728,6 +772,7 @@ static void h_start(const char *entities)
 }
 
 static int h_falls;     /* EV_FALLSHORT/EV_FALL/EV_FALLFAR of clients so far */
+static int h_steps;     /* EV_FOOTSTEP of clients so far */
 
 static void h_frame(void)
 {
@@ -737,6 +782,7 @@ static void h_frame(void)
     for (int n = 1; n < ge->num_edicts; n++) {
         int ev = EDICT(n)->s.event;
         h_falls += EDICT(n)->client && (ev == EV_FALLSHORT || ev == EV_FALL || ev == EV_FALLFAR);
+        h_steps += EDICT(n)->client && ev == EV_FOOTSTEP;
         EDICT(n)->s.event = 0;
     }
 }
@@ -918,6 +964,10 @@ static int h_listed(const char *name)
 {
     int mover = !strncmp(name, "t13_", 4) || !strncmp(name, "t14_", 4);
     int crush = !strncmp(name, "t12_", 4) && strcmp(name, "t12_rotating_touch");
+    if (!strncmp(name, "b_", 2)) return h_sched == H_SCHED_TICK;   /* opentdm-60hz ballistics: both variants */
+    if (!strncmp(name, "f_", 2)) return H_ENGINE && h_sched == H_SCHED_TICK;   /* opentdm-60hz falls: engine Pmove only */
+    if (!strncmp(name, "w_", 2) || !strncmp(name, "r_", 2) || !strncmp(name, "d_", 2) || !strncmp(name, "i_", 2))
+        return H_ENGINE && h_sched == H_SCHED_TICK;     /* opentdm-60hz candidate 4 parity: engine Pmove */
     if (h_sched != H_SCHED_TICK) return H_ENGINE && mover;     /* the path ticks follow the schedule */
     return H_ENGINE ? mover || crush : !mover && strcmp(name, "t12_rotating_ride");
 }

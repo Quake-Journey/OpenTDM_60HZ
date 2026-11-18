@@ -34,6 +34,9 @@ static int he_nplanes, he_nnodes, he_nleafs, he_nleafbrushes;
 
 static const hebox_t *he_boxes;     /* brushes of the model being built */
 static int he_brush0;               /* index of its first brush */
+static const int *he_world_contents; /* contents of the world boxes (NULL: all solid) */
+static int he_bcontents[256];       /* contents of every brush */
+static const float *he_world_planes; /* oblique plane of each world box: normal, dist (zero normal: none) */
 
 static int he_plane(int axis, float dist, float sign)
 {
@@ -44,12 +47,20 @@ static int he_plane(int axis, float dist, float sign)
     return he_nplanes++;
 }
 
+static int he_plane_n(const float *normal, float dist)
+{
+    if (he_nplanes >= HE_MAX) Com_Error(ERR_FATAL, "harness bsp: too many planes");
+    VectorCopy(normal, he_planes[he_nplanes].normal);
+    he_planes[he_nplanes].dist = dist;
+    return he_nplanes++;
+}
+
 static int he_leaf(int contents, const int *ids, int n)
 {
     if (he_nleafs >= HE_MAX || he_nleafbrushes + n > HE_MAX) Com_Error(ERR_FATAL, "harness bsp: too many leafs");
     he_leafs[he_nleafs].contents = contents;
-    he_leafs[he_nleafs].cluster = contents ? 0xffff : 0;
-    he_leafs[he_nleafs].area = contents ? 0 : 1;
+    he_leafs[he_nleafs].cluster = (contents & CONTENTS_SOLID) ? 0xffff : 0;
+    he_leafs[he_nleafs].area = (contents & CONTENTS_SOLID) ? 0 : 1;
     he_leafs[he_nleafs].firstbrush = he_nleafbrushes;
     he_leafs[he_nleafs].numbrushes = n;
     for (int i = 0; i < n; i++) he_leafbrushes[he_nleafbrushes++] = he_brush0 + ids[i];
@@ -86,7 +97,9 @@ static int he_build(const float lo[3], const float hi[3], const int *ids, int n)
             }
         }
     }
-    return he_leaf(m ? CONTENTS_SOLID : 0, in, m);
+    int contents = 0;
+    for (int i = 0; i < m; i++) contents |= he_bcontents[he_brush0 + in[i]];
+    return he_leaf(contents, in, m);
 }
 
 static void he_put(FILE *f, const void *p, size_t n)
@@ -123,7 +136,11 @@ static void he_write_bsp(const hebox_t *world, int nworld, const hebox_t *inl, i
         float lo[3], hi[3];
         he_boxes = brushes + nbrushes;
         he_brush0 = nbrushes;
-        for (int i = 0; i < n; i++) { brushes[nbrushes++] = src[i]; ids[i] = i; }
+        for (int i = 0; i < n; i++) {
+            he_bcontents[nbrushes] = !k && he_world_contents ? he_world_contents[i] : CONTENTS_SOLID;
+            brushes[nbrushes++] = src[i];
+            ids[i] = i;
+        }
         for (int a = 0; a < 3; a++) {
             lo[a] = n ? src[0].lo[a] : -1;
             hi[a] = n ? src[0].hi[a] : 1;
@@ -138,12 +155,23 @@ static void he_write_bsp(const hebox_t *world, int nworld, const hebox_t *inl, i
             Com_Error(ERR_FATAL, "harness bsp: world without a node");
     }
 
-    static int sides[256 * 6];
-    for (int i = 0; i < nbrushes; i++)
+    /* six axial sides per brush; a world box with an oblique plane (a
+     * slope) gets it as a seventh side. The tree still splits on the box
+     * faces only: the box region is a solid leaf whose brush the traces
+     * test with all seven sides (point contents there read solid). */
+    static int sides[256 * 7], firstside[256], numsides[256];
+    int nsides = 0;
+    for (int i = 0; i < nbrushes; i++) {
+        firstside[i] = nsides;
         for (int a = 0; a < 3; a++) {
-            sides[6 * i + 2 * a] = he_plane(a, brushes[i].hi[a], 1);
-            sides[6 * i + 2 * a + 1] = he_plane(a, brushes[i].lo[a], -1);
+            sides[nsides++] = he_plane(a, brushes[i].hi[a], 1);
+            sides[nsides++] = he_plane(a, brushes[i].lo[a], -1);
         }
+        const float *p = he_world_planes && i < nworld ? he_world_planes + 4 * i : NULL;
+        if (p && (p[0] || p[1] || p[2]))
+            sides[nsides++] = he_plane_n(p, p[3]);
+        numsides[i] = nsides - firstside[i];
+    }
 
     FILE *f = fopen(he_map, "wb");
     if (!f) Com_Error(ERR_FATAL, "harness bsp: cannot write %s", he_map);
@@ -194,8 +222,10 @@ static void he_write_bsp(const hebox_t *world, int nworld, const hebox_t *inl, i
         he_i32(f, 0); he_i32(f, 0);
     }
     END(13);
-    LUMP(14); for (int i = 0; i < nbrushes; i++) { he_i32(f, 6 * i); he_i32(f, 6); he_i32(f, CONTENTS_SOLID); } END(14);
-    LUMP(15); for (int i = 0; i < 6 * nbrushes; i++) { he_i16(f, sides[i]); he_i16(f, -1); } END(15);
+    LUMP(14);
+    for (int i = 0; i < nbrushes; i++) { he_i32(f, firstside[i]); he_i32(f, numsides[i]); he_i32(f, he_bcontents[i]); }
+    END(14);
+    LUMP(15); for (int i = 0; i < nsides; i++) { he_i16(f, sides[i]); he_i16(f, -1); } END(15);
     LUMP(17); for (int i = 0; i < 2; i++) { he_i32(f, 0); he_i32(f, 0); } END(17);
 #undef LUMP
 #undef END
@@ -209,6 +239,8 @@ static void he_write_bsp(const hebox_t *world, int nworld, const hebox_t *inl, i
 /* ------------------------------------------------------------- interface */
 
 void he_init(void);
+void he_set_world_contents(const int *contents);
+void he_set_world_planes(const float *planes);
 void he_load_map(const float *world, int nworld, const float *inl, int ninline);
 void he_set_game(void *exports);
 void he_inline_bounds(const char *name, float *mins, float *maxs);
@@ -246,6 +278,9 @@ void he_init(void)
     svs.csr = cs_remap_old;
     PmoveInit(&svs.pmp);
 }
+
+void he_set_world_contents(const int *contents) { he_world_contents = contents; }
+void he_set_world_planes(const float *planes) { he_world_planes = planes; }
 
 void he_load_map(const float *world, int nworld, const float *inl, int ninline)
 {

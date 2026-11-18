@@ -79,6 +79,10 @@ void P_DamageFeedback (edict_t *player)
 	static	vec3_t	acolor = {1.0, 1.0, 1.0};
 	static	vec3_t	bcolor = {1.0, 0.0, 0.0};
 
+	// feedback of the damage totals of a whole 100 ms (q2trek/opentdm a8d9d60)
+	if (!FRAMESYNC)
+		return;
+
 	client = player->client;
 
 	// flash the backgrounds behind the status numbers
@@ -188,7 +192,7 @@ void P_DamageFeedback (edict_t *player)
 		side = -DotProduct (v, forward);
 		client->v_dmg_pitch = kick*side*0.3f;
 
-		client->v_dmg_framenum = level.framenum + DAMAGE_FRAMES;
+		client->v_dmg_framenum = level.realframenum + DAMAGE_FRAMES;	// opentdm-60hz: view presentation runs on real frames, also in a timeout
 	}
 
 	//
@@ -252,12 +256,12 @@ void SV_CalcViewOffset (edict_t *ent)
 	else
 	{
 		// add angles based on weapon kick
-		if ((level.framenum % (int)(0.1f * SERVER_FPS)) == 0)
+		if (FRAMESYNC)	// real 100 ms clock (q2trek/opentdm a8d9d60)
 		{
 			VectorCopy (ent->client->kick_angles, angles);
 
 			// add angles based on damage kick
-			ratio = (ent->client->v_dmg_framenum - level.framenum) / (float)DAMAGE_FRAMES;
+			ratio = (ent->client->v_dmg_framenum - level.realframenum) / (float)DAMAGE_FRAMES;
 			if (ratio < 0)
 			{
 				ratio = 0;
@@ -269,7 +273,7 @@ void SV_CalcViewOffset (edict_t *ent)
 
 			// add pitch based on fall kick
 
-			ratio = (ent->client->fall_framenum - level.framenum) / (float)FALL_FRAMES;
+			ratio = (ent->client->fall_framenum - level.realframenum) / (float)FALL_FRAMES;
 			if (ratio < 0)
 				ratio = 0;
 			angles[PITCH] += ratio * ent->client->fall_value;
@@ -314,7 +318,7 @@ void SV_CalcViewOffset (edict_t *ent)
 
 	// add fall height
 
-	ratio = (ent->client->fall_framenum - level.framenum) / (float)FALL_FRAMES;
+	ratio = (ent->client->fall_framenum - level.realframenum) / (float)FALL_FRAMES;
 	if (ratio < 0)
 		ratio = 0;
 	v[2] -= ratio * ent->client->fall_value * 0.4f;
@@ -359,6 +363,10 @@ void SV_CalcGunOffset (edict_t *ent)
 {
 	int		i;
 	float	delta;
+
+	// held between the 100 ms frames, delta movement is over 100 ms (q2trek/opentdm a8d9d60)
+	if (!FRAMESYNC)
+		return;
 
 	// gun angles from bobbing
 	ent->client->ps.gunangles[ROLL] = xyspeed * bobfracsin * 0.005f;
@@ -433,6 +441,9 @@ void SV_CalcBlend (edict_t *ent)
 	int		contents;
 	vec3_t	vieworg;
 	int		remaining;
+	// the game clock is frozen in a timeout: warn once, when it runs (q2trek/opentdm a8d9d60;
+	// opentdm-60hz: it freezes on the next grid frame, GAME_FROZEN)
+	qboolean	warn = !GAME_FROZEN;
 
 	ent->client->ps.blend[0] = ent->client->ps.blend[1] = 
 		ent->client->ps.blend[2] = ent->client->ps.blend[3] = 0;
@@ -452,39 +463,59 @@ void SV_CalcBlend (edict_t *ent)
 	else if (contents & CONTENTS_WATER)
 		SV_AddBlend (0.5f, 0.3f, 0.2f, 0.4f, ent->client->ps.blend);
 
-	// add for powerups
-	if (ent->client->quad_framenum > level.framenum)
+	// add for powerups (opentdm-60hz: chosen on the grid frames, as on every
+	// 10 Hz frame, and held between them: a power-up used between two frames
+	// tints the view from the coming grid frame, the fade blinks on the grid)
+	if (FRAMESYNC)
 	{
-		remaining = ent->client->quad_framenum - level.framenum;
-		if (remaining == SECS_TO_FRAMES(3))	// beginning to fade
-			gi.sound(ent, CHAN_ITEM, gi.soundindex("items/damage2.wav"), 1, ATTN_NORM, 0);
-		if (remaining > SECS_TO_FRAMES(3) || ((remaining / SECS_TO_FRAMES(0.1f)) & 4))
-			SV_AddBlend (0, 0, 1, 0.08f, ent->client->ps.blend);
+		float	*pb = ent->client->powerup_blend;
+
+		pb[0] = pb[1] = pb[2] = pb[3] = 0;
+		if (ent->client->quad_framenum > level.framenum)
+		{
+			remaining = ent->client->quad_framenum - level.framenum;
+			if (warn && remaining == SECS_TO_FRAMES(3))	// beginning to fade
+				gi.sound(ent, CHAN_ITEM, gi.soundindex("items/damage2.wav"), 1, ATTN_NORM, 0);
+			if (remaining > SECS_TO_FRAMES(3) || ((remaining / SECS_TO_FRAMES(0.1f)) & 4))
+				pb[2] = 1, pb[3] = 0.08f;
+		}
+		else if (ent->client->invincible_framenum > level.framenum)
+		{
+			remaining = ent->client->invincible_framenum - level.framenum;
+			if (warn && remaining == SECS_TO_FRAMES(3))	// beginning to fade
+				gi.sound(ent, CHAN_ITEM, gi.soundindex("items/protect2.wav"), 1, ATTN_NORM, 0);
+			if (remaining > SECS_TO_FRAMES(3) || ((remaining / SECS_TO_FRAMES(0.1f)) & 4))
+				pb[0] = 1, pb[1] = 1, pb[3] = 0.08f;
+		}
+		else if (ent->client->enviro_framenum > level.framenum)
+		{
+			remaining = ent->client->enviro_framenum - level.framenum;
+			if (warn && remaining == SECS_TO_FRAMES(3))	// beginning to fade
+				gi.sound(ent, CHAN_ITEM, gi.soundindex("items/airout.wav"), 1, ATTN_NORM, 0);
+			if (remaining > SECS_TO_FRAMES(3) || ((remaining / SECS_TO_FRAMES(0.1f)) & 4))
+				pb[1] = 1, pb[3] = 0.08f;
+		}
+		else if (ent->client->breather_framenum > level.framenum)
+		{
+			remaining = ent->client->breather_framenum - level.framenum;
+			if (warn && remaining == SECS_TO_FRAMES(3))	// beginning to fade
+				gi.sound(ent, CHAN_ITEM, gi.soundindex("items/airout.wav"), 1, ATTN_NORM, 0);
+			if (remaining > SECS_TO_FRAMES(3) || ((remaining / SECS_TO_FRAMES(0.1f)) & 4))
+				pb[0] = 0.4f, pb[1] = 1, pb[2] = 0.4f, pb[3] = 0.04f;
+		}
 	}
-	else if (ent->client->invincible_framenum > level.framenum)
+	else if (ent->health <= 0 ||
+		(ent->client->quad_framenum <= level.framenum && ent->client->invincible_framenum <= level.framenum &&
+		 ent->client->enviro_framenum <= level.framenum && ent->client->breather_framenum <= level.framenum))
 	{
-		remaining = ent->client->invincible_framenum - level.framenum;
-		if (remaining == SECS_TO_FRAMES(3))	// beginning to fade
-			gi.sound(ent, CHAN_ITEM, gi.soundindex("items/protect2.wav"), 1, ATTN_NORM, 0);
-		if (remaining > SECS_TO_FRAMES(3) || ((remaining / SECS_TO_FRAMES(0.1f)) & 4))
-			SV_AddBlend (1, 1, 0, 0.08f, ent->client->ps.blend);
+		// the power-ups were taken away between two grid frames (death, the
+		// intermission): no tint from this frame on, as at 10 Hz (they run
+		// out on grid frames only)
+		ent->client->powerup_blend[3] = 0;
 	}
-	else if (ent->client->enviro_framenum > level.framenum)
-	{
-		remaining = ent->client->enviro_framenum - level.framenum;
-		if (remaining == SECS_TO_FRAMES(3))	// beginning to fade
-			gi.sound(ent, CHAN_ITEM, gi.soundindex("items/airout.wav"), 1, ATTN_NORM, 0);
-		if (remaining > SECS_TO_FRAMES(3) || ((remaining / SECS_TO_FRAMES(0.1f)) & 4))
-			SV_AddBlend (0, 1, 0, 0.08f, ent->client->ps.blend);
-	}
-	else if (ent->client->breather_framenum > level.framenum)
-	{
-		remaining = ent->client->breather_framenum - level.framenum;
-		if (remaining == SECS_TO_FRAMES(3))	// beginning to fade
-			gi.sound(ent, CHAN_ITEM, gi.soundindex("items/airout.wav"), 1, ATTN_NORM, 0);
-		if (remaining > SECS_TO_FRAMES(3) || ((remaining / SECS_TO_FRAMES(0.1f)) & 4))
-			SV_AddBlend (0.4f, 1, 0.4f, 0.04f, ent->client->ps.blend);
-	}
+	if (ent->client->powerup_blend[3] > 0)
+		SV_AddBlend (ent->client->powerup_blend[0], ent->client->powerup_blend[1],
+			ent->client->powerup_blend[2], ent->client->powerup_blend[3], ent->client->ps.blend);
 
 	// add for damage
 	if (ent->client->damage_alpha > 0)
@@ -559,7 +590,7 @@ void P_FallingDamage (edict_t *ent)
 	if (ent->client->fall_value > 40)
 		ent->client->fall_value = 40;
 
-	ent->client->fall_framenum = level.framenum + FALL_FRAMES;
+	ent->client->fall_framenum = level.realframenum + FALL_FRAMES;	// opentdm-60hz: view presentation runs on real frames, also in a timeout
 
 	if (delta > 30)
 	{
@@ -570,7 +601,8 @@ void P_FallingDamage (edict_t *ent)
 			else
 				gi.sound (ent, CHAN_AUTO, soundcache[SND_FALL2], 1, ATTN_NORM, 0);
 		}
-		ent->pain_debounce_framenum = level.framenum;	// no normal pain sound
+		// no normal pain sound (the feedback of this 100 ms) (q2trek/opentdm a8d9d60)
+		ent->pain_debounce_framenum = level.framenum + SECS_TO_FRAMES(0.1f) - 1;
 		damage = (delta-30)/2;
 		if (damage < 1)
 			damage = 1;
@@ -604,6 +636,14 @@ void P_WorldEffects (void)
 		current_player->air_finished_framenum = level.framenum + SECS_TO_FRAMES(12);	// don't need air
 		return;
 	}
+
+	// opentdm-60hz: the water effects run on the grid frames, as on every
+	// 10 Hz frame: the water level of the grid frame, its sounds, air and
+	// drowning (12 s of air, then a hit every 1.1 s: "< framenum" counted in
+	// 100 ms ticks), lava and slime. Every 60 Hz frame drowned 83 ms earlier
+	// and then every 61 frames, 1.017 s.
+	if (!FRAMESYNC)
+		return;
 
 	waterlevel = current_player->waterlevel;
 	old_waterlevel = current_client->old_waterlevel;
@@ -703,7 +743,7 @@ void P_WorldEffects (void)
 				else
 					gi.sound (current_player, CHAN_VOICE, soundcache[SND_GURP2], 1, ATTN_NORM, 0);
 
-				current_player->pain_debounce_framenum = level.framenum;
+				current_player->pain_debounce_framenum = level.framenum + SECS_TO_FRAMES(0.1f) - 1;	// (q2trek/opentdm a8d9d60)
 
 				T_Damage (current_player, world, world, vec3_origin, current_player->s.origin, vec3_origin, current_player->dmg, 0, DAMAGE_NO_ARMOR, MOD_WATER);
 			}
@@ -735,7 +775,7 @@ void P_WorldEffects (void)
 
 			//FIXME: ugly hack to a void sizzle damage being multiplied based on server framenum, can be biased depending on what
 			//frame the client entered the volume
-			if ((level.framenum % (int)(0.1f * SERVER_FPS)) == 0)
+			if (FRAMESYNC)	// (q2trek/opentdm a8d9d60)
 			{
 				if (envirosuit)	// take 1/3 damage with envirosuit
 					T_Damage (current_player, world, world, vec3_origin, current_player->s.origin, vec3_origin, 1*waterlevel, 0, 0, MOD_LAVA);
@@ -751,7 +791,7 @@ void P_WorldEffects (void)
 			{	
 				//FIXME: ugly hack to a void sizzle damage being multiplied based on server framenum, can be biased depending on what
 				//frame the client entered the volume
-				if ((level.framenum % (int)(0.1f * SERVER_FPS)) == 0)
+				if (FRAMESYNC)	// (q2trek/opentdm a8d9d60)
 				{
 					T_Damage (current_player, world, world, vec3_origin, current_player->s.origin, vec3_origin, 1*waterlevel, 0, 0, MOD_SLIME);
 				}
@@ -771,11 +811,23 @@ void G_SetClientEffects (edict_t *ent)
 	int		pa_type;
 	int		remaining;
 
+	// opentdm-60hz: a dead player and the scoreboard show none, in every frame,
+	// as at 10 Hz (the head thrown off a gibbed player sets EF_GIB on the
+	// player: cleared in the same frame, no trail)
+	if (ent->health <= 0 || tdm_match_status == MM_SCOREBOARD)
+	{
+		ent->s.effects = 0;
+		ent->s.renderfx = 0;
+		return;
+	}
+
+	// opentdm-60hz: a living player's effects (power-up glow, power armor, shells)
+	// are chosen on the grid frames, as on every 10 Hz frame, and held between
+	if (!FRAMESYNC)
+		return;
+
 	ent->s.effects = 0;
 	ent->s.renderfx = 0;
-
-	if (ent->health <= 0 || tdm_match_status == MM_SCOREBOARD)
-		return;
 
 	if (ent->powerarmor_framenum > level.framenum)
 	{
@@ -1057,6 +1109,10 @@ void ClientEndServerFrame (edict_t *ent)
 		else
 			bobmove = 0.0625f;
 	}
+	else
+	{
+		bobmove = 0;	// no cycle in the air at any rate (q2trek/opentdm a8d9d60)
+	}
 
 	bobmove *= (10.0f / (1 * SERVER_FPS));
 
@@ -1072,8 +1128,11 @@ void ClientEndServerFrame (edict_t *ent)
 	bobcycle = (int)bobtime;
 	bobfracsin = fabs(sin(bobtime*M_PI));
 
-	// detect hitting the floor
-	P_FallingDamage (ent);
+	// detect hitting the floor: on the 100 ms grid, against the velocity of
+	// 100 ms before (oldvelocity below), as at 10 Hz; a check every faster
+	// step would measure the landing speed later and hit harder (opentdm-60hz C1)
+	if (FRAMESYNC)
+		P_FallingDamage (ent);
 
 	// apply all the damage taken this frame
 	P_DamageFeedback (ent);
@@ -1138,8 +1197,10 @@ void ClientEndServerFrame (edict_t *ent)
 		ent->client->last_model_frame = ent->s.frame;
 	}
 
-	VectorCopy (ent->velocity, ent->client->oldvelocity);
-	VectorCopy (ent->client->ps.viewangles, ent->client->oldviewangles);
+	if (FRAMESYNC)	// the falling damage sample: same grid as P_FallingDamage
+		VectorCopy (ent->velocity, ent->client->oldvelocity);
+	if (FRAMESYNC)	// gun lag delta over 100 ms (q2trek/opentdm a8d9d60)
+		VectorCopy (ent->client->ps.viewangles, ent->client->oldviewangles);
 
 	// clear weapon kicks
 	VectorClear (ent->client->kick_angles);

@@ -110,11 +110,14 @@ static void TDM_ApplyVote (void)
 			level.match_end_framenum = level.match_start_framenum + SECS_TO_FRAMES(g_match_time->value);
 
 			//end immediately if timelimit was reduced
-			if (level.match_end_framenum < level.framenum)
-				level.match_end_framenum = level.framenum;
+			// opentdm-60hz: on the coming grid frame (a vote passes between two frames),
+			// as on the coming tick at 10 Hz
+			if (level.match_end_framenum < G_WindowFrame (level.framenum))
+				level.match_end_framenum = G_WindowFrame (level.framenum);
 
 			//tl was extended during OT, remove OT
-			if (level.match_end_framenum > level.framenum && (tdm_match_status == MM_OVERTIME || tdm_match_status == MM_SUDDEN_DEATH))
+			// opentdm-60hz: against the same grid frame (a cut to that frame is no extension)
+			if (level.match_end_framenum > G_WindowFrame (level.framenum) && (tdm_match_status == MM_OVERTIME || tdm_match_status == MM_SUDDEN_DEATH))
 			{
 				gi.bprintf (PRINT_HIGH, "Timelimit extended, %s canceled!\n",tdm_match_status == MM_OVERTIME ? "overtime" : "sudden death");
 				tdm_match_status = MM_PLAYING;
@@ -232,6 +235,9 @@ static void TDM_ApplyVote (void)
 			goto abort;
 
 		gi.bprintf (PRINT_CHAT, "Restarting the match...\n");
+
+		// the interrupted match's MVD ends here, the restart opens the next one
+		TDM_MvdEndMatch ("restarted");
 		
 		//ugly, but we need to free dynamic memory since the match start allocs a new array
 		gi.TagFree (current_matchinfo.teamplayers);
@@ -259,6 +265,7 @@ static void TDM_ApplyVote (void)
 	{
 abort:
 		gi.bprintf (PRINT_CHAT, "Match aborted.\n");
+		TDM_MvdEndMatch (NULL);	// an aborted match keeps the name without a score
 		TDM_EndMatch ();
 	}
 
@@ -1368,9 +1375,8 @@ void TDM_CreateConfiglist (void)
 	snprintf (path, sizeof(path)-1, "./%s/configs/*.cfg", gamedir->string);
 	path[sizeof(path)-1] = '\0';
 
-	filename = Sys_FindFirst (path);
-
-	while (filename)
+	// every entry advances the scan, a skipped one too (q2trek/opentdm c7b7ce198)
+	for (filename = Sys_FindFirst (path); filename; filename = Sys_FindNext ())
 	{
 		valid = true;
 
@@ -1412,8 +1418,6 @@ void TDM_CreateConfiglist (void)
 			gi.TagFree (tdm_configlist);
 			tdm_configlist = tmp;
 		}
-
-		filename = Sys_FindNext ();
 	}
 	
 	// close before return

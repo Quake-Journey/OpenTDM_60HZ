@@ -1994,6 +1994,7 @@ unsigned SV_Frame(unsigned msec)
     // move autonomous things around if enough time has passed
     // (credit in ms * rate units, a step costs FRAME_CREDIT)
     sv.framecredit += (uint64_t)msec * SV_FRAMERATE;
+    SV_TickDiagWake(sv.framecredit >= FRAME_CREDIT);
     if (sv.framecredit < FRAME_CREDIT) {
         return SV_FrameBudget();
     }
@@ -2008,6 +2009,8 @@ unsigned SV_Frame(unsigned msec)
 
         run = svs.initialized && !check_paused();
         if (run) {
+            SV_TickDiagStep(sv.framecredit);
+
             // check timeouts
             SV_CheckTimeouts();
 
@@ -2019,9 +2022,12 @@ unsigned SV_Frame(unsigned msec)
 
             // let everything in the world think and move
             SV_RunGameFrame();
+            SV_MotionDiagStep();
+            SV_TickDiagStepDone(false);
 
             // send messages back to the UDP clients
             SV_SendClientMessages();
+            SV_TickDiagStepDone(true);
 
             // send a heartbeat to the master if needed
             SV_MasterHeartbeat();
@@ -2056,6 +2062,7 @@ unsigned SV_Frame(unsigned msec)
     if (sv.framecredit > 250 * SV_FRAMERATE) {
         Com_DDDPrintf("Reset residual %"PRIu64"\n", sv.framecredit / SV_FRAMERATE);
         sv.framecredit = 100 * SV_FRAMERATE;
+        SV_TickDiagResidualReset();
     }
 
     return 0;
@@ -2227,6 +2234,9 @@ Only called at quake2.exe startup, not for each game
 void SV_Init(void)
 {
     SV_InitOperatorCommands();
+
+    SV_TickDiagInit();
+    SV_MotionDiagInit();
 
     SV_MvdRegister();
 

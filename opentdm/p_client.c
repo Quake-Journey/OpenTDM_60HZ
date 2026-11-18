@@ -361,7 +361,7 @@ void TossClientWeapon (edict_t *self)
 	if (!((int)(dmflags->value) & DF_QUAD_DROP))
 		quad = false;
 	else
-		quad = (self->client->quad_framenum > (level.framenum + SECS_TO_FRAMES(1)));
+		quad = (self->client->quad_framenum > (G_WindowFrame (level.framenum) + SECS_TO_FRAMES(1)));	// opentdm-60hz: from the coming grid frame
 
 	if (item && quad)
 		spread = 22.5f;
@@ -458,7 +458,8 @@ void player_die (edict_t *self, edict_t *inflictor, edict_t *attacker, int damag
 
 	if (!self->deadflag)
 	{
-		self->client->respawn_framenum = level.framenum + SECS_TO_FRAMES(g_respawn_time->value);
+		// opentdm-60hz: counted from the coming grid frame, as from the coming tick at 10 Hz
+		self->client->respawn_framenum = G_WindowFrame (level.framenum) + SECS_TO_FRAMES(g_respawn_time->value);
 		LookAtKiller (self, inflictor, attacker);
 		self->client->ps.pmove.pm_type = PM_DEAD;
 		ClientObituary (self, inflictor, attacker);
@@ -1090,6 +1091,10 @@ void CopyToBodyQue (edict_t *ent)
 	body->owner = ent->owner;
 	body->movetype = ent->movetype;
 	body->groundentity = ent->groundentity;
+	// a reused body slot is not cleared (G_FreeEdict keeps reserved slots):
+	// its toss segment starts anew (opentdm-60hz)
+	body->toss_step = 0;
+	body->toss_hold = false;
 
 	body->die = body_die;
 	body->takedamage = DAMAGE_YES;
@@ -1825,6 +1830,15 @@ void ClientThink (edict_t *ent, usercmd_t *ucmd)
 		client->resp.cmd_angles[1] = SHORT2ANGLE(ucmd->angles[1]);
 		client->resp.cmd_angles[2] = SHORT2ANGLE(ucmd->angles[2]);
 		client->ps.pmove.pm_type = PM_FREEZE;
+		// the weapon does not run during a timeout: follow the real
+		// buttons, so that fire released during the pause is not still
+		// down on resume, and drop a press made during it (q2trek/opentdm 54d592a)
+		if (tdm_match_status == MM_TIMEOUT)
+		{
+			client->oldbuttons = client->buttons;
+			client->buttons = ucmd->buttons;
+			client->latched_buttons &= ~BUTTON_ATTACK;
+		}
 		return;
 	}
 
@@ -2036,6 +2050,12 @@ void ClientBeginServerFrame (edict_t *ent)
 	gclient_t	*client;
 
 	if (tdm_match_status == MM_SCOREBOARD)
+		return;
+
+	// opentdm-60hz: the client's 10 Hz frame (weapon step, idle check,
+	// respawn, the latched buttons) runs once per 100 ms window, on its
+	// grid frame, as every frame of a 10 Hz world does
+	if (!FRAMESYNC)
 		return;
 
 	client = ent->client;

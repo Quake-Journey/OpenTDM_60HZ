@@ -123,7 +123,8 @@ void SetRespawn (edict_t *ent, float delay)
 	ent->flags |= FL_RESPAWN;
 	ent->svflags |= SVF_NOCLIENT;
 	ent->solid = SOLID_NOT;
-	ent->nextthink = level.framenum + SECS_TO_FRAMES(delay);
+	// opentdm-60hz: from the coming grid frame (a pickup is between two frames), as from the coming tick at 10 Hz
+	ent->nextthink = G_WindowFrame (level.framenum) + SECS_TO_FRAMES(delay);
 	ent->think = DoRespawn;
 	gi.linkentity (ent);
 }
@@ -141,7 +142,9 @@ qboolean Pickup_Powerup (edict_t *ent, edict_t *other)
 	if (((int)dmflags->value & DF_INSTANT_ITEMS) || ((ent->item->use == Use_Quad) && (ent->spawnflags & DROPPED_PLAYER_ITEM)))
 	{
 		if ((ent->item->use == Use_Quad) && (ent->spawnflags & DROPPED_PLAYER_ITEM))
-			quad_drop_timeout_hack = (ent->nextthink - level.framenum);
+			// opentdm-60hz: the rest from the coming grid frame, where Use_Quad starts it:
+			// the quad ends when the dropped one would have gone, as at 10 Hz
+			quad_drop_timeout_hack = (ent->nextthink - G_WindowFrame (level.framenum));
 
 		ent->item->use (other, ent->item);
 	}
@@ -319,7 +322,7 @@ void Use_Quad (edict_t *ent, const gitem_t *item)
 		ent->client->quad_framenum += timeout;
 	else
 	{
-		ent->client->quad_framenum = level.framenum + timeout;
+		ent->client->quad_framenum = G_WindowFrame (level.framenum) + timeout;	// opentdm-60hz: from the coming grid frame
 		TDM_UpdateSpectatorsOnEvent (SPEC_QUAD, ent, NULL);
 	}
 
@@ -336,7 +339,7 @@ void Use_Breather (edict_t *ent, const gitem_t *item)
 	if (ent->client->breather_framenum > level.framenum)
 		ent->client->breather_framenum += SECS_TO_FRAMES(30);
 	else
-		ent->client->breather_framenum = level.framenum + SECS_TO_FRAMES(30);
+		ent->client->breather_framenum = G_WindowFrame (level.framenum) + SECS_TO_FRAMES(30);	// opentdm-60hz
 
 //	gi.sound(ent, CHAN_ITEM, gi.soundindex("items/damage.wav"), 1, ATTN_NORM, 0);
 }
@@ -351,7 +354,7 @@ void Use_Envirosuit (edict_t *ent, const gitem_t *item)
 	if (ent->client->enviro_framenum > level.framenum)
 		ent->client->enviro_framenum += SECS_TO_FRAMES(30);
 	else
-		ent->client->enviro_framenum = level.framenum + SECS_TO_FRAMES(30);
+		ent->client->enviro_framenum = G_WindowFrame (level.framenum) + SECS_TO_FRAMES(30);	// opentdm-60hz
 
 //	gi.sound(ent, CHAN_ITEM, gi.soundindex("items/damage.wav"), 1, ATTN_NORM, 0);
 }
@@ -367,7 +370,7 @@ void	Use_Invulnerability (edict_t *ent, const gitem_t *item)
 		ent->client->invincible_framenum += SECS_TO_FRAMES(30);
 	else
 	{
-		ent->client->invincible_framenum = level.framenum + SECS_TO_FRAMES(30);
+		ent->client->invincible_framenum = G_WindowFrame (level.framenum) + SECS_TO_FRAMES(30);	// opentdm-60hz
 		TDM_UpdateSpectatorsOnEvent (SPEC_INVUL, ent, NULL);
 	}
 
@@ -522,7 +525,7 @@ qboolean Pickup_Health (edict_t *ent, edict_t *other)
 	if (ent->style & HEALTH_TIMED)
 	{
 		ent->think = MegaHealth_think;
-		ent->nextthink = level.framenum + SECS_TO_FRAMES(5);
+		ent->nextthink = G_WindowFrame (level.framenum) + SECS_TO_FRAMES(5);	// opentdm-60hz: mega health runs down on the grid
 		ent->owner = other;
 		ent->flags |= FL_RESPAWN;
 		ent->svflags |= SVF_NOCLIENT;
@@ -731,7 +734,7 @@ void Touch_Item (edict_t *ent, edict_t *other, cplane_t *plane, csurface_t *surf
 		// show icon and name on status bar
 		other->client->ps.stats[STAT_PICKUP_ICON] = gi.imageindex(ent->item->icon);
 		other->client->ps.stats[STAT_PICKUP_STRING] = CS_ITEMS+ITEM_INDEX(ent->item);
-		other->client->pickup_msg_framenum = level.framenum + SECS_TO_FRAMES(3);
+		other->client->pickup_msg_framenum = G_WindowFrame (level.framenum) + SECS_TO_FRAMES(3);	// opentdm-60hz
 
 		// change selected item
 
@@ -834,7 +837,9 @@ edict_t *Drop_Item (edict_t *ent, const gitem_t *item)
 	dropped->velocity[2] = 300;
 
 	dropped->think = drop_make_touchable;
-	dropped->nextthink = level.framenum + SECS_TO_FRAMES(1);
+	// opentdm-60hz: from the coming grid frame (a drop command or a death is between
+	// two frames), as from the coming tick at 10 Hz; it goes 29 s after, on the grid
+	dropped->nextthink = G_WindowFrame (level.framenum) + SECS_TO_FRAMES(1);
 
 	gi.linkentity (dropped);
 

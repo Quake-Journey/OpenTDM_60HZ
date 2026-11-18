@@ -52,7 +52,9 @@ void multi_trigger (edict_t *ent)
 	if (ent->wait > 0)	
 	{
 		ent->think = multi_wait;
-		ent->nextthink = level.framenum + SECS_TO_FRAMES(ent->wait);
+		// opentdm-60hz: from the coming grid frame (a touch is between two
+		// frames), in whole 100 ms ticks, as at 10 Hz
+		ent->nextthink = G_WindowFrame (level.framenum) + G_GridFrames (ent->wait);
 	}
 	else
 	{	// we can't just remove (self) here, because this is a touch function
@@ -295,9 +297,11 @@ void trigger_push_touch (edict_t *self, edict_t *other, cplane_t *plane, csurfac
 		{
 			// don't take falling damage immediately from this
 			VectorCopy (other->velocity, other->client->oldvelocity);
-			if (other->fly_sound_debounce_framenum < level.framenum)
+			// opentdm-60hz: a touch is between two frames: the sound repeats
+			// on the 100 ms grid, as at 10 Hz
+			if (other->fly_sound_debounce_framenum < G_WindowFrame (level.framenum))
 			{
-				other->fly_sound_debounce_framenum = level.framenum + SECS_TO_FRAMES(1.5f);
+				other->fly_sound_debounce_framenum = G_WindowFrame (level.framenum) + SECS_TO_FRAMES(1.5f);
 				gi.sound (other, CHAN_AUTO, windsound, 1, ATTN_NORM, 0);
 			}
 		}
@@ -358,21 +362,29 @@ void hurt_use (edict_t *self, edict_t *other, edict_t *activator)
 void hurt_touch (edict_t *self, edict_t *other, cplane_t *plane, csurface_t *surf)
 {
 	int		dflags;
+	int		wf;
 
 	if (!other->takedamage)
 		return;
 
-	if (self->touch_debounce_framenum > level.framenum)
+	// opentdm-60hz: a touch is between two frames: counted on the 100 ms grid,
+	// as at 10 Hz. One hit per 100 ms window (SLOW: per 1 s), the next with the
+	// first touch of the window after; the sound with a hit of a whole-second
+	// window. (q2trek/opentdm e669822 counted 0.1 s from the touch: the next
+	// hits up to 83 ms later than at 10 Hz, the sound at other moments.)
+	wf = G_WindowFrame (level.framenum);
+
+	if (self->touch_debounce_framenum > wf)
 		return;
 
 	if (self->spawnflags & 16)
-		self->touch_debounce_framenum = level.framenum + SECS_TO_FRAMES(1);
+		self->touch_debounce_framenum = wf + SECS_TO_FRAMES(1);
 	else
-		self->touch_debounce_framenum = level.framenum + 1;
+		self->touch_debounce_framenum = wf + SECS_TO_FRAMES(0.1f);
 
 	if (!(self->spawnflags & 4))
 	{
-		if ((level.framenum % SECS_TO_FRAMES(1)) == 0)
+		if ((wf % SECS_TO_FRAMES(1)) == 0)
 			gi.sound (other, CHAN_AUTO, self->noise_index, 1, ATTN_NORM, 0);
 	}
 

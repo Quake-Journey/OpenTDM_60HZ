@@ -755,7 +755,8 @@ void Cmd_Kill_f (edict_t *ent)
 	if (!ent->client->pers.team)
 		return;
 
-	if ((level.framenum - ent->client->respawn_framenum) < SECS_TO_FRAMES (5))
+	// opentdm-60hz: a command is between two frames: counted from the coming grid frame, as at 10 Hz
+	if ((G_WindowFrame (level.framenum) - ent->client->respawn_framenum) < SECS_TO_FRAMES (5))
 		return;
 
 	if (tdm_match_status == MM_COUNTDOWN || tdm_match_status == MM_TIMEOUT || tdm_match_status == MM_SCOREBOARD)
@@ -1107,8 +1108,8 @@ void Cmd_PlayerList_f (edict_t *ent)
 
 		Com_sprintf (st, sizeof(st), "%2d  %3d:%02d  %4d     %3d %s %-13s %s%s\n",
 			(int)(e2 - g_edicts - 1),
-			(level.framenum - e2->client->resp.enterframe) / 600,
-			((level.framenum - e2->client->resp.enterframe) % 600)/10,
+			(level.framenum - e2->client->resp.enterframe) / SECS_TO_FRAMES(60),
+			((level.framenum - e2->client->resp.enterframe) % SECS_TO_FRAMES(60)) / SERVER_FPS,
 			e2->client->ping,
 			e2->client->resp.score,
 			ent->client->pers.admin ? va ("%17s ", ip) : "",

@@ -44,7 +44,10 @@ static void h_rate_refuse(const char *value)
     }
     signal(SIGFPE, SIG_DFL);
     memcpy(h_abort, outer, sizeof(outer));
-#ifdef HARNESS_OPENTDM
+#if defined HARNESS_OPENTDM && defined HARNESS_LOCAL_BASE
+    /* opentdm-60hz: the refusal names the value and the allowed rates */
+    const char *want = va("Invalid server FPS \"%s\": sv_fps must be 10, 20, 30, 40, 50 or 60", value);
+#elif defined HARNESS_OPENTDM
     const char *want = "Invalid server FPS";
 #else
     const char *want = va("Invalid value '%s' for 'sv_fps' cvar", value);
@@ -262,6 +265,14 @@ static void h_batch_taps(const char *weapon, const char *ammo, int mz)
         printf("  info %s batch taps phase %d/%d: %d in the batch, %d shots, %d ammo\n", weapon, k, h_div, inpack, shots, used);
         if (inpack) {
             strict++;
+#ifdef HARNESS_LOCAL_BASE
+            /* opentdm-60hz candidate 4: the original 10 Hz window: the second
+             * press inside the window of the first is lost, as in the original
+             * module (w_timing tap2_N lines equal to it at 10/30/60 Hz) */
+            CHECK(shots == 1 && used == 1, "%s phase %d/%d: first press fired in the batch, the second inside its window is lost, as in the original (got %d shots, %d ammo)",
+                  weapon, k, h_div, shots, used);
+            continue;
+#endif
             CHECK(shots == 2 && used == 2, "%s phase %d/%d: first press fired in the batch, the second is the next shot (got %d shots, %d ammo)",
                   weapon, k, h_div, shots, used);
         } else {
@@ -503,6 +514,7 @@ static void sc_t09_lifecycle_timeout(void) { h_lifecycle(H_LC_TIMEOUT); }
  * 2 for a player who has not voted. A tap while blocked fires nothing,
  * neither during the block nor after it is lifted (the pending press is
  * dropped); then a new tap fires once. */
+#ifndef HARNESS_LOCAL_BASE
 static void h_attention(int byvote)
 {
     h_set_override(byvote ? "g_vote_attention" : "g_ready_attention", byvote ? "2" : "1");
@@ -544,8 +556,11 @@ static void h_attention(int byvote)
     for (int i = 0; i < 2 * h_rate; i++) h_tick(p, 0, 1);
     CHECK(h_any_shots(p, m) == 1, "then a new tap: 1 shot (got %d)", h_any_shots(p, m));
 }
+#endif
+#ifndef HARNESS_LOCAL_BASE
 static void sc_t09_lifecycle_readyattn(void) { h_attention(0); }
 static void sc_t09_lifecycle_votehold(void) { h_attention(1); }
+#endif
 #endif
 
 /* ---------------------------------------------------------------- T10 */
@@ -626,6 +641,19 @@ static void sc_t10_grenade_held_explodes(void)
     CHECK(h_grenade() == NULL, "no flying grenade");
 }
 
+#ifdef HARNESS_LOCAL_BASE
+/* opentdm-60hz candidate 4: a grid projectile moves a whole 100 ms on the
+ * grid frames only: the speed is its next step / 0.1 s */
+static float h_grenade_step_speed(edict_t *g, float x0)
+{
+    for (int i = 0; i < 2 * h_div && g->inuse && g->s.origin[0] == x0; i++) h_frame();
+    return (g->s.origin[0] - x0) * 10;
+}
+#define H_GRENADE_STEP_SPEED(g, x0) h_grenade_step_speed(g, x0)
+#else
+#define H_GRENADE_STEP_SPEED(g, x0) (h_frame(), ((g)->s.origin[0] - (x0)) * h_rate)
+#endif
+
 /* Release with 1 s remaining: the throw happens on the next weapon frame
  * after release; forward speed (x displacement per frame on level aim)
  * is the original curve at timer 1 s. */
@@ -645,8 +673,7 @@ static void sc_t10_grenade_release_1s(void)
     if (!g) return;
     CHECK(thrown - arm == 22 * h_div, "thrown 2.2 s (%d frames) after arming, 1 s remaining (got %d)", 22 * h_div, thrown - arm);
     float x0 = g->s.origin[0];
-    h_frame();
-    float speed = (g->s.origin[0] - x0) * h_rate;
+    float speed = H_GRENADE_STEP_SPEED(g, x0);
     CHECK(fabsf(speed - H_GRENADE_SPEED_1S) <= 1, "forward speed %.2f = %d +- 1", speed, H_GRENADE_SPEED_1S);
     int boom = -1, m = h_nmsgs;
     for (int i = 0; i < 3 * h_rate && boom < 0; i++) { h_frame(); if (h_explosions(m)) boom = h_frames - 1; }
@@ -671,8 +698,7 @@ static void sc_t10_grenade_quick(void)
     if (!g) return;
     h_tick(p, BUTTON_ATTACK, 1);
     float x0 = g->s.origin[0];
-    h_frame();
-    float speed = (g->s.origin[0] - x0) * h_rate;
+    float speed = H_GRENADE_STEP_SPEED(g, x0);
     CHECK(fabsf(speed - H_GRENADE_SPEED_QUICK) <= 1, "quick release speed %.2f = %d +- 1", speed, H_GRENADE_SPEED_QUICK);
     int boom = -1;
     for (int i = 0; i < 5 * h_rate && boom < 0; i++) { h_tick(p, 0, 1); if (h_explosions(m)) boom = h_frames - 1; }
@@ -688,6 +714,13 @@ static void sc_t10_grenade_quick(void)
  * grenade flies 100 ms later, as at 10 Hz. */
 static void sc_t10_grenade_pending_tap(void)
 {
+#ifdef HARNESS_LOCAL_BASE
+    /* opentdm-60hz candidate 4: the local base runs the weapon in the 10 Hz
+     * windows of the original code (no per-player weapon clock, no pending
+     * press, q2trek 10faaef removed); hand grenade taps, re-taps and holds
+     * are compared with the original module by w_timing (hg lines). */
+    printf("OBS t10_grenade_pending_tap: local base, covered by w_timing hg against the original module\n");
+#else
     edict_t *p = h_armed("grenades", "grenades", 5);
     int arm = h_arm_grenade(p);
     CHECK(arm >= 0, "grenade armed by real input");
@@ -759,6 +792,7 @@ static void sc_t10_grenade_pending_tap(void)
     CHECK(g != NULL && thrown == released + h_div,
           "one flying grenade on the following 100 ms weapon update (got frame %d, expected %d)", thrown, released + h_div);
     CHECK(a - h_ammo(p) == 1, "exactly one grenade spent");
+#endif
 }
 
 /* Death while holding an armed grenade: it goes off at once (timer 0) at
@@ -779,7 +813,12 @@ static void sc_t10_grenade_death(void)
     int k = h_frames, boom = -1;
     for (int i = 0; i < 2 * h_div && boom < 0; i++) { h_frame(); if (h_explosions(m)) boom = h_frames - 1; }
     CHECK(p->deadflag, "dead");
-#ifdef HARNESS_OPENTDM
+#if defined HARNESS_OPENTDM && defined HARNESS_LOCAL_BASE
+    /* opentdm-60hz candidate 4: the client's 10 Hz frame runs on the grid
+     * frames: the first grid frame after the death, as the next tick at 10 Hz */
+    CHECK(boom >= k && boom < k + h_div,
+          "explodes on the first grid frame after the death: frames [%d, %d) (got %d)", k, k + h_div, boom);
+#elif defined HARNESS_OPENTDM
     CHECK(boom == k, "explodes in the frame of the death (frame %d, got %d)", k, boom);
 #else
     CHECK(boom >= k && boom < k + h_div, "explodes at the first weapon step after the death: frames [%d, %d) (got %d)", k, k + h_div, boom);
@@ -838,6 +877,9 @@ static int h_hp(edict_t *p) { return h_health(p) + h_stat(p, STAT_ARMOR); }
 
 #define H_MAXTICKS (10 * 60)    /* 10 s at the highest harness rate */
 static int h_snd[H_MAXTICKS];   /* hurt sounds per tick of the last h_hurt_run */
+#if defined HARNESS_OPENTDM && defined HARNESS_LOCAL_BASE
+static int h_wf[H_MAXTICKS];    /* the 100 ms grid frame of the usercmds of each tick */
+#endif
 
 /* step into the trigger, then `ticks` world ticks of `ncmds` usercmds;
  * hits[i] = health lost in tick i, h_snd[i] = hurt sounds in it; returns total */
@@ -848,6 +890,9 @@ static int h_hurt_run(edict_t *p, int ticks, int ncmds, int *hits, int *sounds)
     h_place(p, 512, 0, 24);
     for (int i = 0; i < ticks; i++) {
         int hp = h_hp(p), s0 = h_nsounds;
+#if defined HARNESS_OPENTDM && defined HARNESS_LOCAL_BASE
+        h_wf[i] = G_WindowFrame(level.framenum);    /* between frames: the coming frame */
+#endif
         h_tick(p, 0, ncmds);
         hits[i] = hp - h_hp(p);
         h_snd[i] = h_count_sounds(electro, s0);
@@ -856,6 +901,31 @@ static int h_hurt_run(edict_t *p, int ticks, int ncmds, int *hits, int *sounds)
     *sounds = h_count_sounds(electro, s);
     return total;
 }
+
+#if defined HARNESS_OPENTDM && defined HARNESS_LOCAL_BASE
+/* opentdm-60hz rework 3 (Fable 18.11, E2): the hurt zone of the original
+ * module at 10 Hz, kept at every rate on the 100 ms grid (i_world hurt/slow
+ * compares it with the original module in 6 phases): one hit per 100 ms
+ * window (SLOW: per 1 s), the first at the touch, the next with the first
+ * touch of the window after; the sound with a hit of a whole-second window.
+ * The ticks of the last h_hurt_run against that rule: the number of ticks
+ * that differ, the expected hits and sounds. At 10 Hz every tick is a
+ * window: one hit per tick, the sound on the whole seconds. */
+static int h_hurt_rule(const int *hits, int ticks, int slow, int silent, int *want_hits, int *want_sounds)
+{
+    int debounce = 0, bad = 0;
+    *want_hits = *want_sounds = 0;
+    for (int i = 0; i < ticks; i++) {
+        int hit = debounce <= h_wf[i];
+        if (hit) debounce = h_wf[i] + (slow ? SECS_TO_FRAMES(1) : SECS_TO_FRAMES(0.1f));
+        int snd = hit && !silent && h_wf[i] % SECS_TO_FRAMES(1) == 0;
+        *want_hits += hit;
+        *want_sounds += snd;
+        bad += hits[i] != hit || h_snd[i] != snd;
+    }
+    return bad;
+}
+#endif
 
 /* normal: first hit in the tick of first contact, then one every 0.1 s:
  * 10 hits in [t0, t0 + 1 s); the sound has its own 1 s cooldown: once in
@@ -870,6 +940,144 @@ static void h_hurt_leave(edict_t *p)
     h_frame();      /* the HUD health stat follows at the end of a frame */
 }
 
+#if defined HARNESS_OPENTDM && defined HARNESS_LOCAL_BASE
+/* the 10 Hz rule of h_hurt_rule, first contact in every phase of the 100 ms
+ * step: 3 s of contact with one usercmd per tick, then 1 s with two */
+static void sc_t11_hurt_normal(void)
+{
+    h_hurt_scene(0);
+    edict_t *p = h_join(0, "p1");
+    static int hits[H_MAXTICKS];
+    int sounds, wh, ws, total;
+    for (int k = 0; k < h_div; k++) {
+        if (k) h_hurt_leave(p);
+        h_phase(p, k);
+        total = h_hurt_run(p, 3 * h_rate, 1, hits, &sounds);
+        int bad = h_hurt_rule(hits, 3 * h_rate, 0, 0, &wh, &ws);
+        CHECK(hits[0] == 1, "phase %d/%d: first hit in the contact tick (%d)", k, h_div, hits[0]);
+        CHECK(!bad && total == wh && sounds == ws && wh >= 30 && wh <= 31 && ws >= 3 && ws <= 4,
+              "phase %d/%d: one hit per 100 ms window, the sound in the whole-second windows "
+              "(%d ticks differ; %d hits, %d sounds; the rule %d, %d)", k, h_div, bad, total, sounds, wh, ws);
+    }
+    h_hurt_leave(p);
+    total = h_hurt_run(p, h_rate, 2, hits, &sounds);
+    int bad = h_hurt_rule(hits, h_rate, 0, 0, &wh, &ws);
+    CHECK(!bad && total == wh && wh >= 10 && wh <= 11, "two usercmds per tick: one hit per window (%d ticks differ, %d hits)",
+          bad, total);
+}
+
+/* SLOW (16): one hit per second of the grid, the sound only with a hit of a
+ * whole-second window */
+static void sc_t11_hurt_slow(void)
+{
+    h_hurt_scene(16);
+    edict_t *p = h_join(0, "p1");
+    static int hits[H_MAXTICKS];
+    int sounds, wh, ws;
+    for (int k = 0; k < h_div; k++) {
+        if (k) h_hurt_leave(p);
+        h_phase(p, k);
+        int total = h_hurt_run(p, 2 * h_rate, 1, hits, &sounds);
+        int bad = h_hurt_rule(hits, 2 * h_rate, 1, 0, &wh, &ws);
+        CHECK(hits[0] == 1 && !bad && total == wh && sounds == ws && wh >= 2 && wh <= 3,
+              "phase %d/%d: SLOW: one hit per second of the grid (%d ticks differ; %d hits, %d sounds; the rule %d, %d)",
+              k, h_div, bad, total, sounds, wh, ws);
+    }
+}
+
+/* TOGGLE (2): the real use callback switches the source off and on; back
+ * on, the first contact hits at once, then by the rule */
+static void sc_t11_hurt_toggle(void)
+{
+    h_hurt_scene(2);
+    edict_t *p = h_join(0, "p1");
+    edict_t *t = NULL;
+    for (int n = 1; n < ge->num_edicts; n++)
+        if (EDICT(n)->inuse && EDICT(n)->use && !strcmp(EDICT(n)->classname, "trigger_hurt")) t = EDICT(n);
+    CHECK(t != NULL, "toggleable trigger_hurt spawned");
+    if (!t) return;
+    static int hits[H_MAXTICKS];
+    int wh, ws, sounds, total = h_hurt_run(p, h_rate, 1, hits, &sounds);
+    int bad = h_hurt_rule(hits, h_rate, 0, 0, &wh, &ws);
+    CHECK(!bad && total == wh && wh >= 10, "on: one hit per window (%d ticks differ, %d hits)", bad, total);
+    t->use(t, p, p);
+    total = h_hurt_run(p, 2 * h_rate, 1, hits, &sounds);
+    CHECK(total == 0 && sounds == 0, "off: no hit, no sound in 2 s (got %d, %d)", total, sounds);
+    t->use(t, p, p);
+    total = h_hurt_run(p, h_rate, 1, hits, &sounds);
+    bad = h_hurt_rule(hits, h_rate, 0, 0, &wh, &ws);
+    CHECK(hits[0] == 1, "on again: first hit at once (%d)", hits[0]);
+    CHECK(!bad && total == wh && sounds == ws, "on again: by the rule (%d ticks differ; %d hits, %d sounds)", bad, total,
+          sounds);
+}
+
+/* SILENT (4): damage without sound */
+static void sc_t11_hurt_silent(void)
+{
+    h_hurt_scene(4);
+    edict_t *p = h_join(0, "p1");
+    static int hits[H_MAXTICKS];
+    int sounds, wh, ws;
+    int total = h_hurt_run(p, h_rate, 1, hits, &sounds);
+    int bad = h_hurt_rule(hits, h_rate, 0, 1, &wh, &ws);
+    CHECK(!bad && total == wh && wh >= 10 && sounds == 0, "SILENT: one hit per window, no sound (%d ticks differ, %d, %d)",
+          bad, total, sounds);
+}
+
+/* NO_PROTECTION (8) hurts a god-mode player; the plain trigger does not */
+static void sc_t11_hurt_no_protection(void)
+{
+    static int hits[H_MAXTICKS];
+    int sounds;
+    h_hurt_scene(0);
+    edict_t *p = h_join(0, "p1");
+    h_client_command(p, "god");
+    int total = h_hurt_run(p, h_rate, 1, hits, &sounds);
+    CHECK(total == 0, "god mode, plain trigger: no damage (got %d)", total);
+}
+
+static void sc_t11_hurt_no_protection_god(void)
+{
+    static int hits[H_MAXTICKS];
+    int sounds, wh, ws;
+    h_hurt_scene(8);
+    edict_t *p = h_join(0, "p1");
+    h_client_command(p, "god");
+    int total = h_hurt_run(p, h_rate, 1, hits, &sounds);
+    int bad = h_hurt_rule(hits, h_rate, 0, 0, &wh, &ws);
+    CHECK(!bad && total == wh && wh >= 10, "god mode, NO_PROTECTION: one hit per window (%d ticks differ, %d hits)", bad,
+          total);
+}
+
+/* One source, two players inside: the debounce is per source, so the
+ * source deals one hit per 100 ms window in total over both players, the
+ * sound with the hits of whole-second windows. */
+static void sc_t11_hurt_shared(void)
+{
+    h_hurt_scene(0);
+    edict_t *a = h_join(0, "p1"), *b = h_join(1, "p2");
+    int electro = h_find(h_sounds, "world/electro.wav");
+    int s = h_nsounds, debounce = 0, want = 0, want_snd = 0;
+    int ha = h_hp(a), hb = h_hp(b);
+    for (int i = 0; i <= h_rate; i++) {
+        int wf = G_WindowFrame(level.framenum);
+        if (debounce <= wf) {
+            debounce = wf + SECS_TO_FRAMES(0.1f);
+            want++;
+            want_snd += wf % SECS_TO_FRAMES(1) == 0;
+        }
+        if (!i) { h_place(a, 512, 0, 24); h_place(b, 512, 0, 24); }
+        h_think(a, 0, 1000 / h_rate);
+        h_think(b, 0, 1000 / h_rate);
+        h_frame();
+    }
+    int da = ha - h_hp(a), db = hb - h_hp(b), sounds = h_count_sounds(electro, s);
+    CHECK(da + db == want && want >= 10, "shared source: one hit per window over both players (got %d + %d, the rule %d)",
+          da, db, want);
+    CHECK(sounds == want_snd, "shared source: the sounds of whole-second windows over both players (got %d, the rule %d)",
+          sounds, want_snd);
+}
+#else
 static void sc_t11_hurt_normal(void)
 {
     h_hurt_scene(0);
@@ -999,6 +1207,7 @@ static void sc_t11_hurt_shared(void)
     CHECK(da + db == 10, "shared source: 10 hits per second over both players (got %d + %d)", da, db);
     CHECK(sounds == 1, "shared source: one hurt sound in the first second over both players (got %d)", sounds);
 }
+#endif
 
 /* Damage with knockback but no direction (hurt and crush pass a zero
  * dir): no push, the velocity stays what it was. */
@@ -1447,10 +1656,21 @@ static void sc_t12_crush_overflow(void)
     for (int i = 0; i < 4; i++) v[i] = G_Spawn();
     h_crush_spawn_fill();
     int first, gap, hits;
+#ifdef HARNESS_LOCAL_BASE
+    /* opentdm-60hz TZ 5.D: overflow hits are counted; g_crushdiag 0 is
+     * silent, 1 reports at most once per second */
+    imp_cvar_set("g_crushdiag", "0");
+    int ov0 = level.crush_overflows, dp0 = h_ndprints;
+#endif
 
     /* reused edict (first, while the freed slot is reusable at once) */
     hits = h_crush_run(s1, NULL, v[0], 1, &first, &gap);
     CHECK(hits == 1, "overflow: the first hit at once (%d)", hits);
+#ifdef HARNESS_LOCAL_BASE
+    CHECK(level.crush_overflows == ov0 + 1 && h_ndprints == dp0,
+          "crushdiag 0: the overflow hit is counted (%d -> %d), no message (%d)", ov0, level.crush_overflows,
+          h_ndprints - dp0);
+#endif
     int slot = NUM(v[0]);
     G_FreeEdict(v[0]);
     edict_t *n = G_Spawn();
@@ -1459,9 +1679,19 @@ static void sc_t12_crush_overflow(void)
     CHECK(hits == 1, "a reused edict: hit at once, no inherited cooldown (%d)", hits);
 
     /* one source, then two sources on one victim: 10 hits in 1 s */
+#ifdef HARNESS_LOCAL_BASE
+    imp_cvar_set("g_crushdiag", "1");
+    int ov1 = level.crush_overflows, dp1 = h_ndprints;
+#endif
     hits = h_crush_run(s1, NULL, v[1], h_rate, &first, &gap);
     CHECK(first == 0 && hits == 10 && gap >= h_div, "one source: first hit tick %d, %d hits in 1 s (10), gap %d ticks (>= %d)",
           first, hits, gap, h_div);
+#ifdef HARNESS_LOCAL_BASE
+    CHECK(level.crush_overflows - ov1 == 10 && h_ndprints - dp1 == 1 && strstr(h_last_dprint, "crushdiag: all 64 crush pairs busy"),
+          "crushdiag 1: 10 overflow hits counted (%d), one message in 1 s (%d): %s", level.crush_overflows - ov1,
+          h_ndprints - dp1, h_last_dprint);
+    imp_cvar_set("g_crushdiag", "0");
+#endif
     hits = h_crush_run(s1, s2, v[2], h_rate, &first, &gap);
     CHECK(first == 0 && hits == 10 && gap >= h_div, "two sources: first hit tick %d, %d hits in 1 s (10), gap %d ticks (>= %d)",
           first, hits, gap, h_div);
@@ -2403,6 +2633,12 @@ static void sc_t15_players_time(void)
  * hand. Held: the grenade stays cooking in the window, then a release
  * throws it. */
 enum { H_TO_MG, H_TO_RELEASE, H_TO_HOLD };
+#ifdef HARNESS_LOCAL_BASE
+/* opentdm-60hz candidate 4: weapon steps on the 100 ms grid frames (FRAMESYNC) */
+#define H_NEXT_WEAPON_STEP(p) ((h_div - level.realframenum % h_div) % h_div)
+#else
+#define H_NEXT_WEAPON_STEP(p) ((p)->client->next_weapon_think - level.framenum)
+#endif
 static void h_timeout_fire(int kind)
 {
     h_set_override("g_timeout_limit", "0");     /* one timeout per phase */
@@ -2424,9 +2660,9 @@ static void h_timeout_fire(int kind)
             CHECK(h_arm_grenade(a) >= 0, "phase %d: grenade armed", k);
         }
         /* the next weapon step k world frames ahead */
-        for (int i = 0; i < 3 * h_div && a->client->next_weapon_think - level.framenum != k; i++)
+        for (int i = 0; i < 3 * h_div && H_NEXT_WEAPON_STEP(a) != k; i++)
             h_tick(a, BUTTON_ATTACK, 1);
-        CHECK(a->client->next_weapon_think - level.framenum == k, "phase %d/%d of the weapon step", k, h_div);
+        CHECK(H_NEXT_WEAPON_STEP(a) == k, "phase %d/%d of the weapon step", k, h_div);
         int ammo = h_ammo(a), m0 = h_nmsgs;
         h_client_command(a, "time");
         CHECK(tdm_match_status == MM_TIMEOUT, "phase %d: timeout (status %d)", k, tdm_match_status);
@@ -2501,6 +2737,7 @@ static void sc_t17_ghost_ratelimit(void)
 /* g_ping_handicap: the displayed ping jitters as at 10 Hz on every
  * scoreboard refresh (3 s): +3 every 4th refresh, -2 two refreshes later,
  * the plain value between */
+#ifndef HARNESS_LOCAL_BASE
 static void sc_t17_ping_handicap(void)
 {
     h_set_override("g_ping_handicap", "50");
@@ -2516,6 +2753,7 @@ static void sc_t17_ping_handicap(void)
         n++;
     }
 }
+#endif
 #endif
 
 /* ---------------------------------------------------------------- T18 */
@@ -2701,7 +2939,11 @@ static void sc_t18_powerup_warn_timeout(void)
     if (!h_tdm_start(a, b)) return;
     h_give(a, "quad damage", 0);
     h_client_command(a, "use quad damage");
+#ifdef HARNESS_LOCAL_BASE
+    h_frames_n(h_div);      /* candidate 4: effects are chosen on the grid frames, as on every 10 Hz frame */
+#else
     h_frame();
+#endif
     CHECK(a->s.effects & EF_QUAD, "quad active");
     while (a->client->quad_framenum - level.framenum > 3 * h_rate) h_frame();
     int s = h_nsounds;
@@ -2730,6 +2972,9 @@ static void sc_t18_environment_resume(void)
     CHECK(tdm_match_status == MM_TIMEOUT, "timeout");
     a->waterlevel = 1;
     a->watertype = CONTENTS_LAVA;
+#ifdef HARNESS_LOCAL_BASE
+    while (!level.timeout_frozen) h_frame();     /* opentdm-60hz: frozen from the next grid frame */
+#endif
     int hp = h_hp_now(a), frozen = level.framenum;
     h_frames_n(h_div + 1);
     CHECK(level.framenum == frozen && h_hp_now(a) == hp, "no world damage while paused");
@@ -2737,8 +2982,13 @@ static void sc_t18_environment_resume(void)
     h_client_command(a, "time");
     for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) h_frame();
     CHECK(tdm_match_status == MM_PLAYING, "resumed");
+#ifdef HARNESS_LOCAL_BASE
+    /* opentdm-60hz candidate 4: the game clock freezes and resumes on grid frames */
+    CHECK(level.framenum % h_div == level.realframenum % h_div, "game and real phases stay equal");
+#else
     if (h_div > 1)
         CHECK(level.framenum % h_div != level.realframenum % h_div, "game and real phases differ");
+#endif
     for (int liquid = 0; liquid < 2; liquid++) {
         h_give(a, "health", 100);
         int total = 0, wrong = 0;
@@ -2786,7 +3036,10 @@ static void sc_t18_kick_timeout(void)
 }
 #endif
 
+#include "scenarios_60hz.h"
+
 static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
+    H_SCENARIOS_60HZ
     { "smoke", sc_smoke },
     { "t01_rate_refuse", sc_t01_rate_refuse },
     { "t01_rate_zero", sc_t01_rate_zero },
@@ -2817,8 +3070,10 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
 #ifdef HARNESS_OPENTDM
     { "t09_lifecycle_countdown", sc_t09_lifecycle_countdown },
     { "t09_lifecycle_timeout", sc_t09_lifecycle_timeout },
+#ifndef HARNESS_LOCAL_BASE  /* the local OpenTDM blocks no fire for ready attention or a held vote */
     { "t09_lifecycle_readyattn", sc_t09_lifecycle_readyattn },
     { "t09_lifecycle_votehold", sc_t09_lifecycle_votehold },
+#endif
 #endif
     { "t10_grenade_held_explodes", sc_t10_grenade_held_explodes },
     { "t10_grenade_release_1s", sc_t10_grenade_release_1s },
@@ -2873,7 +3128,9 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t01_fixed_engine", sc_t01_fixed_engine },
     { "t18_environment_resume", sc_t18_environment_resume },
     { "t17_ghost_ratelimit", sc_t17_ghost_ratelimit },
+#ifndef HARNESS_LOCAL_BASE  /* no g_ping_handicap in the local OpenTDM */
     { "t17_ping_handicap", sc_t17_ping_handicap },
+#endif
     { "t18_flash_window", sc_t18_flash_window },
     { "t18_blend_batches", sc_t18_blend_batches },
     { "t18_gun_sway", sc_t18_gun_sway },

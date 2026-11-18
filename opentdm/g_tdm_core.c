@@ -200,24 +200,47 @@ char *TDM_SetColorText (char *buffer)
 	return buffer;
 }
 
+/*
+Server frame rate. Without the engine's variable FPS support (sv_features)
+the world runs at 10 Hz whatever sv_fps says. With it, sv_fps must be one
+of 10, 20, 30, 40, 50, 60 written as a whole number: anything else is
+refused (no silent truncation of "60.5" or "25"), so the engine and the
+game always run the same rate. The engine checks a latched change at the
+map start the same way and keeps the previous rate.
+*/
+static qboolean TDM_ParseFrameRate (const char *s, int *rate)
+{
+	int	v = 0, digits = 0;
+
+	while (*s >= '0' && *s <= '9' && digits < 3)
+	{
+		v = v * 10 + (*s++ - '0');
+		digits++;
+	}
+
+	if (!digits || *s || v < 10 || v > 60 || v % 10)
+		return false;
+
+	*rate = v;
+	return true;
+}
+
 void TDM_SetFrameTime (void)
 {
 	cvar_t	*sv_fps;
 
-	sv_fps = gi.cvar ("sv_fps", NULL, 0);
-	if (!sv_fps)
+	if (!(game.server_features & GMF_VARIABLE_FPS))
 	{
-		FRAMETIME = 0.1f;
 		SERVER_FPS = 10;
 	}
 	else
 	{
-		FRAMETIME = 1.0f / sv_fps->value;
-		SERVER_FPS = (int)sv_fps->value;
+		sv_fps = gi.cvar ("sv_fps", "10", CVAR_LATCH);
+		if (!TDM_ParseFrameRate (sv_fps->string, &SERVER_FPS))
+			gi.error ("Invalid server FPS \"%s\": sv_fps must be 10, 20, 30, 40, 50 or 60", sv_fps->string);
 	}
 
-	if ((int)(0.1f / FRAMETIME) == 0)
-		gi.error ("Invalid server FPS");
+	FRAMETIME = 1.0f / SERVER_FPS;
 }
 
 /*
@@ -456,6 +479,9 @@ void TDM_BeginMatch (void)
 	}
 
 	TDM_UpdateConfigStrings (false);
+
+	// opentdm-60hz: the automatic match MVD starts with this "Fight!"
+	TDM_MvdBeginMatch ();
 }
 
 /*
@@ -1066,7 +1092,8 @@ void TDM_BeginCountdown (void)
 	//called to apply a temporary hack for people who do 1v1 on tdm mode
 	TDM_UpdateTeamNames ();
 	
-	level.match_start_framenum = level.framenum + SECS_TO_FRAMES(g_match_countdown->value);
+	// opentdm-60hz: counted from the coming grid frame, "Fight!" falls on the grid as at 10 Hz
+	level.match_start_framenum = G_WindowFrame (level.framenum) + SECS_TO_FRAMES(g_match_countdown->value);
 
 	// wision: force players to record
 	for (client = g_edicts + 1; client <= g_edicts + game.maxclients; client++)
@@ -1303,6 +1330,10 @@ void TDM_EndMatch (void)
 	level.match_end_framenum = 0;
 
 	TDM_BeginIntermission ();
+
+	// opentdm-60hz: the automatic match MVD ends after this frame (scores and
+	// the intermission included); a cancelled match keeps its name
+	TDM_MvdEndMatch (winner == TEAM_SPEC ? NULL : forfeit ? "forfeit" : "");
 }
 
 void TDM_Overtime (void)
@@ -1437,6 +1468,8 @@ void TDM_CheckTimes (void)
 {
 	edict_t		*ent;
 
+	TDM_MvdCheck ();
+
 	if (tdm_match_status < MM_PLAYING && level.match_start_framenum)
 	{
 		int		remaining;
@@ -1467,7 +1500,9 @@ void TDM_CheckTimes (void)
 		{
 			gi.bprintf (PRINT_HIGH, "%d\n", (int)(remaining / SERVER_FPS));
 		}
-		else if (remaining == 0)
+		// opentdm-60hz: the game resumes on a grid frame (the clock froze on
+		// one): the frozen time is whole 100 ms windows, as at 10 Hz
+		else if (remaining <= 0 && FRAMESYNC)
 		{
 			TDM_FixDeltaAngles ();
 			gi.bprintf (PRINT_HIGH, "Fight!\n");
@@ -1557,8 +1592,8 @@ void TDM_CheckTimes (void)
 		if (remaining <= 0)
 			TDM_EndIntermission ();
 
-		// take screenshot 5 frames after the intermission began
-		if (remaining == SECS_TO_FRAMES (g_intermission_time->value) - 5)
+		// take screenshot 0.5 seconds after the intermission began (q2trek/opentdm e669822)
+		if (remaining == SECS_TO_FRAMES (g_intermission_time->value) - SECS_TO_FRAMES (0.5f))
 		{
 			edict_t *client;
 
@@ -1982,7 +2017,7 @@ void TDM_ResumeGame (void)
 	gi.bprintf (PRINT_CHAT, "Game resuming in 10 seconds. Match time remaining: %s\n", TDM_SecsToString(FRAMES_TO_SECS(level.match_end_framenum - level.framenum)));
 
 	level.timeout_end_framenum = 0;
-	level.match_resume_framenum = level.realframenum + SECS_TO_FRAMES(10.4f);
+	level.match_resume_framenum = G_WindowFrame (level.realframenum) + SECS_TO_FRAMES(10.4f);	// opentdm-60hz: from the coming grid frame
 }
 
 /*
@@ -2480,6 +2515,9 @@ void TDM_ResetGameState (void)
 {
 	edict_t		*ent;
 
+	// a reset ends an automatic match MVD that is still open, without a score
+	TDM_MvdEndMatch (NULL);
+
 	level.tdm_pseudo_1v1mode = false;
 	level.match_start_framenum = 0;
 	level.warmup_start_framenum = level.framenum;
@@ -2919,7 +2957,8 @@ void TDM_UpdateConfigStrings (qboolean forceUpdate)
 
 		last_time_remaining = time_remaining;
 
-		secs = ceil((float)time_remaining * FRAMETIME);
+		// whole frames to seconds rounded up, without the float 1/SERVER_FPS error (q2trek/opentdm e669822)
+		secs = (time_remaining + SERVER_FPS - 1) / SERVER_FPS;
 
 		if (secs < 0)
 			secs = 0;
@@ -2955,7 +2994,7 @@ void TDM_UpdateConfigStrings (qboolean forceUpdate)
 
 		last_timeout_remaining = timeout_remaining;
 
-		secs = ceil((float)timeout_remaining * FRAMETIME);
+		secs = (timeout_remaining + SERVER_FPS - 1) / SERVER_FPS;
 
 		if (secs < 0)
 			secs = 0;

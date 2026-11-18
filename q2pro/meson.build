@@ -63,6 +63,8 @@ client_src = [
   'src/server/init.c',
   'src/server/main.c',
   'src/server/send.c',
+  'src/server/motiondiag.c',
+  'src/server/tickdiag.c',
   'src/server/user.c',
   'src/server/world.c',
   'src/shared/m_flash.c',
@@ -107,7 +109,9 @@ server_src = [
   'src/server/game.c',
   'src/server/init.c',
   'src/server/main.c',
+  'src/server/motiondiag.c',
   'src/server/send.c',
+  'src/server/tickdiag.c',
   'src/server/user.c',
   'src/server/world.c',
 ]

@@ -26,6 +26,7 @@ src = [
   'g_tdm_core.c',
   'g_tdm_curl.c',
   'g_tdm_macros.c',
+  'g_tdm_mvd.c',
   'g_tdm_stats.c',
   'g_tdm_vote.c',
   'g_tdm_votemenu.c',

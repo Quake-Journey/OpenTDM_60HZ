@@ -182,7 +182,8 @@ void use_target_explosion (edict_t *self, edict_t *other, edict_t *activator)
 	}
 
 	self->think = target_explosion_explode;
-	self->nextthink = level.framenum + SECS_TO_FRAMES(self->delay);
+	// opentdm-60hz: from the coming grid frame, in whole 100 ms ticks, as at 10 Hz
+	self->nextthink = G_WindowFrame (level.framenum) + G_GridFrames (self->delay);
 }
 
 void SP_target_explosion (edict_t *ent)
