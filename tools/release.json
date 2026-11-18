@@ -1,0 +1,25 @@
+{
+ "release": "r6010",
+ "engine": {
+  "version": "r6010~60hz.187fcd9",
+  "file": "q2proded64.exe",
+  "accepted_sha256": "afbc3305e69bed7c8187af697b5e3c737983591fc6510a0c03dc12b24f03de26"
+ },
+ "module": {
+  "version": "r6010~60hz.ade588f",
+  "file": "opentdm/gamex86_64.dll",
+  "accepted_sha256": "8c6ab27def6a6a246514d53f8f4cccf6f83f8042b9423a218bdcbd2d099921f9"
+ },
+ "build_time": {
+  "text": "Nov 18 2026, 17:07:41",
+  "source_date_epoch": 1795021661,
+  "about": "the __DATE__/__TIME__ text of the released files; SOURCE_DATE_EPOCH gives the compiler that moment (UTC)"
+ },
+ "accepted_toolchain": {
+  "gcc": "x86_64-w64-mingw32-gcc 14.1.0 (thread model win32)",
+  "binutils": "2.41",
+  "meson": "1.10.2",
+  "ninja": "1.12.1",
+  "python": "3.14.0"
+ }
+}
