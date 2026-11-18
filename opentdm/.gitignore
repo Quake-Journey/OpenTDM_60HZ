@@ -1,0 +1,13 @@
+/.config*
+/*.d
+/*.o
+/game*.so
+/game*.dll
+/tags
+/TAGS
+
+# meson subprojects (sources unpacked from packagecache), build version
+/subprojects/*/
+!/subprojects/packagefiles/
+/subprojects/.wraplock
+/VERSION
